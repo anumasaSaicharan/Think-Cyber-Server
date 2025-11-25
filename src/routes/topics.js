@@ -1559,6 +1559,286 @@ router.get('/topics/search', async (req, res) => {
   }
 });
 
+// router.get('/topics/deep/search', async (req, res) => {
+//   try {
+//     let { q, page = 1, limit = 10 } = req.query;
+
+//     if (!q || q.trim() === '') {
+//       return res.status(400).json({
+//         success: false,
+//         error: 'Search query is required'
+//       });
+//     }
+
+//     // Clean input
+//     q = q.trim();
+//     const search = `%${q}%`;
+//     const offset = (page - 1) * limit;
+
+//     const sql = `WITH matched AS (
+//         SELECT t.id
+//         FROM topics t
+//         WHERE t.status = 'published'
+//         AND (
+//             t.title ILIKE $1
+//             OR t.description ILIKE $1
+//             OR t.content ILIKE $1
+//             OR t.tags::text ILIKE $1
+
+//             OR EXISTS (
+//               SELECT 1 
+//               FROM topic_modules tm 
+//               WHERE tm.topic_id = t.id
+//                 AND tm.is_active = TRUE
+//                 AND (tm.title ILIKE $1 OR tm.description ILIKE $1)
+//             )
+
+//             OR EXISTS (
+//               SELECT 1 
+//               FROM topic_videos tv 
+//               WHERE tv.topic_id = t.id
+//                 AND tv.is_active = TRUE
+//                 AND (
+//                   tv.title ILIKE $1
+//                   OR tv.description ILIKE $1
+//                   OR tv.transcript ILIKE $1
+//                   OR tv.resources::text ILIKE $1
+//                 )
+//             )
+//         )
+//       ),
+
+//       total AS (
+//         SELECT COUNT(*) AS total FROM matched
+//       )
+
+//       SELECT 
+//         t.*,
+//         c.name AS category_name,
+//         sc.name AS subcategory_name,
+//         total.total
+//       FROM topics t
+//       JOIN matched m ON m.id = t.id
+//       LEFT JOIN category c ON t.category_id = c.id
+//       LEFT JOIN subcategory sc ON t.subcategory_id = sc.id
+//       CROSS JOIN total
+//       ORDER BY t.view_count DESC, t.created_at DESC
+//       LIMIT $2 OFFSET $3`;
+
+//     const result = await req.pool.query(sql, [search, limit, offset]);
+
+//     const topics = result.rows.map(row => ({
+//       id: row.id,
+//       title: row.title,
+//       description: row.description,
+//       content: row.content,
+//       slug: row.slug,
+//       difficulty: row.difficulty,
+//       isFeatured: row.is_featured,
+//       isFree: row.is_free,
+//       price: parseFloat(row.price || 0),
+//       durationMinutes: row.duration_minutes,
+//       thumbnailUrl: row.thumbnail_url,
+//       tags: row.tags || [],
+//       viewCount: row.view_count,
+//       enrollmentCount: row.enrollment_count,
+//       createdAt: row.created_at,
+//       updatedAt: row.updated_at
+//     }));
+
+//     const totalCount = result.rows.length ? parseInt(result.rows[0].total) : 0;
+
+//     res.json({
+//       success: true,
+//       data: topics,
+//       pagination: {
+//         currentPage: Number(page),
+//         totalPages: Math.ceil(totalCount / limit),
+//         totalCount,
+//         limit: Number(limit)
+//       }
+//     });
+
+//   } catch (err) {
+//     console.error('Error in GET /topics/deep/search:', err);
+//     res.status(500).json({
+//       success: false,
+//       error: err.message || 'Internal server error'
+//     });
+//   }
+// });
+
+router.get('/topics/deep/search', async (req, res) => {
+  try {
+    let { q, page = 1, limit = 10 } = req.query;
+
+    if (!q || q.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'Search query is required'
+      });
+    }
+
+    q = q.trim();
+    const search = `%${q}%`;
+    const offset = (page - 1) * limit;
+
+    const sql = `
+      WITH matched AS (
+        SELECT 
+          t.id,
+
+          -- WHICH FIELD MATCHED?
+          CASE 
+            WHEN t.title ILIKE $1 THEN 'title'
+            WHEN t.description ILIKE $1 THEN 'description'
+            WHEN t.content ILIKE $1 THEN 'content'
+            WHEN t.tags::text ILIKE $1 THEN 'tags'
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_modules tm
+              WHERE tm.topic_id = t.id AND tm.is_active = TRUE AND tm.title ILIKE $1
+            ) THEN 'module.title'
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_modules tm
+              WHERE tm.topic_id = t.id AND tm.is_active = TRUE AND tm.description ILIKE $1
+            ) THEN 'module.description'
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_videos tv
+              WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.title ILIKE $1
+            ) THEN 'video.title'
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_videos tv
+              WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.description ILIKE $1
+            ) THEN 'video.description'
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_videos tv
+              WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.transcript ILIKE $1
+            ) THEN 'video.transcript'
+          END AS matched_field,
+
+          -- WHAT TEXT MATCHED?
+          CASE 
+            WHEN t.title ILIKE $1 THEN t.title
+            WHEN t.description ILIKE $1 THEN t.description
+            WHEN t.content ILIKE $1 THEN t.content
+            WHEN t.tags::text ILIKE $1 THEN t.tags::text
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_modules tm
+              WHERE tm.topic_id = t.id AND tm.is_active = TRUE AND tm.title ILIKE $1
+            ) THEN (SELECT tm.title FROM topic_modules tm WHERE tm.topic_id = t.id AND tm.is_active = TRUE AND tm.title ILIKE $1 LIMIT 1)
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_modules tm
+              WHERE tm.topic_id = t.id AND tm.is_active = TRUE AND tm.description ILIKE $1
+            ) THEN (SELECT tm.description FROM topic_modules tm WHERE tm.topic_id = t.id AND tm.is_active = TRUE AND tm.description ILIKE $1 LIMIT 1)
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_videos tv
+              WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.title ILIKE $1
+            ) THEN (SELECT tv.title FROM topic_videos tv WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.title ILIKE $1 LIMIT 1)
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_videos tv
+              WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.description ILIKE $1
+            ) THEN (SELECT tv.description FROM topic_videos tv WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.description ILIKE $1 LIMIT 1)
+
+            WHEN EXISTS (
+              SELECT 1 FROM topic_videos tv
+              WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.transcript ILIKE $1
+            ) THEN (SELECT tv.transcript FROM topic_videos tv WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND tv.transcript ILIKE $1 LIMIT 1)
+          END AS matched_value
+
+        FROM topics t
+        WHERE t.status = 'published'
+        AND (
+          t.title ILIKE $1
+          OR t.description ILIKE $1
+          OR t.content ILIKE $1
+          OR t.tags::text ILIKE $1 
+          OR EXISTS (SELECT 1 FROM topic_modules tm WHERE tm.topic_id = t.id AND tm.is_active = TRUE AND (tm.title ILIKE $1 OR tm.description ILIKE $1))
+          OR EXISTS (SELECT 1 FROM topic_videos tv WHERE tv.topic_id = t.id AND tv.is_active = TRUE AND (tv.title ILIKE $1 OR tv.description ILIKE $1 OR tv.transcript ILIKE $1))
+        )
+      ),
+
+      total AS (
+        SELECT COUNT(*) AS total FROM matched
+      )
+
+      SELECT 
+        t.*,
+        m.matched_field,
+        m.matched_value,
+        c.name AS category_name,
+        sc.name AS subcategory_name,
+        total.total
+      FROM topics t
+      JOIN matched m ON m.id = t.id
+      LEFT JOIN category c ON t.category_id = c.id
+      LEFT JOIN subcategory sc ON t.subcategory_id = sc.id
+      CROSS JOIN total
+      ORDER BY t.view_count DESC, t.created_at DESC
+      LIMIT $2 OFFSET $3;
+    `;
+
+    const result = await req.pool.query(sql, [search, limit, offset]);
+
+    const topics = result.rows.map(row => ({
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      content: row.content,
+      slug: row.slug,
+      difficulty: row.difficulty,
+      isFeatured: row.is_featured,
+      isFree: row.is_free,
+      price: parseFloat(row.price || 0),
+      durationMinutes: row.duration_minutes,
+      thumbnailUrl: row.thumbnail_url,
+      tags: row.tags || [],
+      viewCount: row.view_count,
+      enrollmentCount: row.enrollment_count,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+
+      // NEW → what matched?
+      matchedField: row.matched_field,
+      matchedValue: row.matched_value,
+
+      categoryName: row.category_name,
+      subcategoryName: row.subcategory_name
+    }));
+
+    const totalCount = result.rows.length ? parseInt(result.rows[0].total) : 0;
+
+    res.json({
+      success: true,
+      data: topics,
+      pagination: {
+        currentPage: Number(page),
+        totalPages: Math.ceil(totalCount / limit),
+        totalCount,
+        limit: Number(limit)
+      }
+    });
+
+  } catch (err) {
+    console.error('Error in GET /topics/deep/search:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error'
+    });
+  }
+});
+
+
+
+
 // GET /api/topics/list - Simple list without pagination (for dropdowns)
 router.get('/topics/list', async (req, res) => {
   try {
