@@ -3,6 +3,7 @@
 
 ALTER TABLE category 
 ADD COLUMN IF NOT EXISTS description TEXT,
+ADD COLUMN IF NOT EXISTS price INTEGER DEFAULT 0,
 ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'Active' CHECK (status IN ('Active', 'Inactive', 'Draft')),
 ADD COLUMN IF NOT EXISTS topics_count INTEGER DEFAULT 0;
 
@@ -10,6 +11,7 @@ ADD COLUMN IF NOT EXISTS topics_count INTEGER DEFAULT 0;
 UPDATE category 
 SET 
     description = 'Category description',
+    price = 0,
     status = 'Active',
     topics_count = 0
 WHERE description IS NULL OR status IS NULL OR topics_count IS NULL;
@@ -17,6 +19,7 @@ WHERE description IS NULL OR status IS NULL OR topics_count IS NULL;
 -- Add NOT NULL constraint after setting default values
 ALTER TABLE category 
 ALTER COLUMN description SET NOT NULL,
+ALTER COLUMN price SET NOT NULL,
 ALTER COLUMN status SET NOT NULL,
 ALTER COLUMN topics_count SET NOT NULL;
 

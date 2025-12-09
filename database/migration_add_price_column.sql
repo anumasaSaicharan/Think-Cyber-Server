@@ -1,0 +1,6 @@
+ALTER TABLE category
+ADD COLUMN IF NOT EXISTS price INTEGER DEFAULT 0;
+
+UPDATE category
+SET price = 0
+WHERE price IS NULL;

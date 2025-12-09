@@ -166,7 +166,7 @@ router.get('/categories', async (req, res) => {
     const offset = (page - 1) * limit;
 
     // Validate sortBy field to prevent SQL injection
-    const allowedSortFields = ['id', 'name', 'description', 'status', 'topicsCount', 'topics_count', 'createdAt', 'created_at', 'updatedAt', 'updated_at'];
+    const allowedSortFields = ['id', 'name', 'description', 'price', 'status', 'topicsCount', 'topics_count', 'createdAt', 'created_at', 'updatedAt', 'updated_at'];
     let sortField = allowedSortFields.includes(sortBy) ? sortBy : 'id';
     
     // Map camelCase to snake_case for database columns
@@ -184,6 +184,7 @@ router.get('/categories', async (req, res) => {
         id,
         name,
         description,
+        price,
         topics_count,
         status,
         created_at,
@@ -210,6 +211,7 @@ router.get('/categories', async (req, res) => {
       id: row.id,
       name: row.name,
       description: row.description,
+      price:row.price,
       topicsCount: row.topics_count,
       status: row.status,
       createdAt: row.created_at ? row.created_at.toISOString().split('T')[0] : null,
@@ -239,7 +241,7 @@ router.get('/categories', async (req, res) => {
 
 // Sample POST category
 router.post('/categories', async (req, res) => {
-  const { name, description, status } = req.body;
+  const { name, description, price,status } = req.body;
   
   if (!name || name.trim() === '') {
     return res.status(400).json({ 
@@ -261,8 +263,8 @@ router.post('/categories', async (req, res) => {
 
   try {
     const result = await req.pool.query(
-      'INSERT INTO category (name, description, status) VALUES ($1, $2, $3) RETURNING *', 
-      [name.trim(), description.trim(), categoryStatus]
+      'INSERT INTO category (name, description, price,status) VALUES ($1, $2, $3, $4) RETURNING *', 
+      [name.trim(), description.trim(), price,categoryStatus]
     );
 
     // Format the response data
@@ -270,6 +272,7 @@ router.post('/categories', async (req, res) => {
       id: result.rows[0].id,
       name: result.rows[0].name,
       description: result.rows[0].description,
+      price:result.rows[0].price,
       topicsCount: result.rows[0].topics_count || 0,
       status: result.rows[0].status,
       createdAt: result.rows[0].created_at ? result.rows[0].created_at.toISOString().split('T')[0] : null,
@@ -293,7 +296,7 @@ router.post('/categories', async (req, res) => {
 // PUT update category by ID
 router.put('/categories/:id', async (req, res) => {
   const categoryId = parseInt(req.params.id);
-  const { name, description, status } = req.body;
+  const { name, description, price, status } = req.body;
   
   if (!categoryId || isNaN(categoryId)) {
     return res.status(400).json({ 
@@ -336,8 +339,8 @@ router.put('/categories/:id', async (req, res) => {
 
     // Update the category
     const result = await req.pool.query(
-      'UPDATE category SET name = $1, description = $2, status = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING *', 
-      [name.trim(), description.trim(), categoryStatus, categoryId]
+      'UPDATE category SET name = $1, description = $2, price = $3, status = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 RETURNING *', 
+      [name.trim(), description.trim(), price, categoryStatus, categoryId]
     );
 
     // Format the response data
@@ -345,6 +348,7 @@ router.put('/categories/:id', async (req, res) => {
       id: result.rows[0].id,
       name: result.rows[0].name,
       description: result.rows[0].description,
+      price:result.rows[0].price,
       topicsCount: result.rows[0].topics_count || 0,
       status: result.rows[0].status,
       createdAt: result.rows[0].created_at ? result.rows[0].created_at.toISOString().split('T')[0] : null,
