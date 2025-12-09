@@ -3,6 +3,1145 @@ const router = express.Router();
 
 /**
  * @swagger
+ * /api/dashboard/overview:
+ *   get:
+ *     summary: Get dashboard overview statistics
+ *     tags: [Dashboard]
+ *     responses:
+ *       200:
+ *         description: Dashboard statistics retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     totalUsers:
+ *                       type: integer
+ *                       example: 16
+ *                     verifiedUsers:
+ *                       type: integer
+ *                       example: 12
+ *                     totalTopics:
+ *                       type: integer
+ *                       example: 31
+ *                     totalEnrollments:
+ *                       type: integer
+ *                       example: 45
+ *                     enrolledTopics:
+ *                       type: integer
+ *                       example: 45
+ *                     completedTopics:
+ *                       type: integer
+ *                       example: 28
+ *                     topicsInProgress:
+ *                       type: integer
+ *                       example: 17
+ *                     totalWatchTime:
+ *                       type: string
+ *                       example: "125h 30m"
+ *                     totalWatchTimeSeconds:
+ *                       type: integer
+ *                       example: 451800
+ *                     newUsersThisMonth:
+ *                       type: integer
+ *                       example: 2
+ *                     enrollmentsThisMonth:
+ *                       type: integer
+ *                       example: 8
+ *                     userGrowth:
+ *                       type: string
+ *                       example: "+12.5%"
+ *                     enrollmentGrowth:
+ *                       type: string
+ *                       example: "+8.3%"
+ *                     completionRate:
+ *                       type: string
+ *                       example: "68.2%"
+ *                     averageRating:
+ *                       type: string
+ *                       example: "4.6"
+ */
+// GET /api/dashboard/overview - Dashboard overview statistics
+router.get('/dashboard/overview', async (req, res) => {
+  try {
+    // Get total users and verified users
+    const usersQuery = `
+      SELECT 
+        COUNT(*) as total_users,
+        COUNT(CASE WHEN is_verified = true THEN 1 END) as verified_users
+      FROM users
+    `;
+
+    // Get total topics
+    const topicsQuery = `
+      SELECT COUNT(*) as total_topics
+      FROM topics
+      WHERE status = 'published'
+    `;
+
+    // Get enrollment statistics from user_topics
+    const enrollmentsQuery = `
+      SELECT 
+        COUNT(*) as total_enrollments,
+        COUNT(DISTINCT CASE WHEN payment_status = 'completed' THEN topic_id END) as completed_topics,
+        COUNT(DISTINCT CASE WHEN payment_status IN ('pending', 'processing', 'active') THEN topic_id END) as topics_in_progress
+      FROM user_topics
+      WHERE payment_status IS NOT NULL
+    `;
+
+    // Get total watch time from user_topic_progress
+    const watchTimeQuery = `
+      SELECT COALESCE(SUM(watch_time), 0) as total_watch_time_seconds
+      FROM user_topic_progress
+    `;
+
+    // Get new users this month
+    const newUsersQuery = `
+      SELECT COUNT(*) as new_users_this_month
+      FROM users
+      WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_TIMESTAMP)
+    `;
+
+    // Get enrollments this month from user_topics
+    const enrollmentsThisMonthQuery = `
+      SELECT COUNT(*) as enrollments_this_month
+      FROM user_topics
+      WHERE DATE_TRUNC('month', enrolled_at) = DATE_TRUNC('month', CURRENT_TIMESTAMP)
+    `;
+
+    // Get user growth (compare this month vs last month)
+    const userGrowthQuery = `
+      SELECT 
+        COUNT(CASE WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_TIMESTAMP) THEN 1 END) as current_month,
+        COUNT(CASE WHEN DATE_TRUNC('month', created_at) = DATE_TRUNC('month', CURRENT_TIMESTAMP - INTERVAL '1 month') THEN 1 END) as last_month
+      FROM users
+    `;
+
+    // Get enrollment growth (compare this month vs last month) from user_topics
+    const enrollmentGrowthQuery = `
+      SELECT 
+        COUNT(CASE WHEN DATE_TRUNC('month', enrolled_at) = DATE_TRUNC('month', CURRENT_TIMESTAMP) THEN 1 END) as current_month,
+        COUNT(CASE WHEN DATE_TRUNC('month', enrolled_at) = DATE_TRUNC('month', CURRENT_TIMESTAMP - INTERVAL '1 month') THEN 1 END) as last_month
+      FROM user_topics
+    `;
+
+    // Get completion rate from user_topics
+    const completionRateQuery = `
+      SELECT 
+        COUNT(DISTINCT topic_id) as total,
+        COUNT(DISTINCT CASE WHEN payment_status = 'completed' THEN topic_id END) as completed
+      FROM user_topics
+      WHERE payment_status IS NOT NULL
+    `;
+
+    // Get average rating
+    const averageRatingQuery = `
+      SELECT COALESCE(AVG(rating), 0) as average_rating
+      FROM topic_reviews
+      WHERE is_approved = true
+    `;
+
+    // Execute all queries in parallel
+    const [
+      usersResult,
+      topicsResult,
+      enrollmentsResult,
+      watchTimeResult,
+      newUsersResult,
+      enrollmentsThisMonthResult,
+      userGrowthResult,
+      enrollmentGrowthResult,
+      completionRateResult,
+      averageRatingResult
+    ] = await Promise.all([
+      req.pool.query(usersQuery),
+      req.pool.query(topicsQuery),
+      req.pool.query(enrollmentsQuery),
+      req.pool.query(watchTimeQuery),
+      req.pool.query(newUsersQuery),
+      req.pool.query(enrollmentsThisMonthQuery),
+      req.pool.query(userGrowthQuery),
+      req.pool.query(enrollmentGrowthQuery),
+      req.pool.query(completionRateQuery),
+      req.pool.query(averageRatingQuery)
+    ]);
+
+    // Parse results
+    const totalUsers = parseInt(usersResult.rows[0]?.total_users || 0);
+    const verifiedUsers = parseInt(usersResult.rows[0]?.verified_users || 0);
+    const totalTopics = parseInt(topicsResult.rows[0]?.total_topics || 0);
+    const totalEnrollments = parseInt(enrollmentsResult.rows[0]?.total_enrollments || 0);
+    const completedTopics = parseInt(enrollmentsResult.rows[0]?.completed_topics || 0);
+    const topicsInProgress = parseInt(enrollmentsResult.rows[0]?.topics_in_progress || 0);
+    const totalWatchTimeSeconds = parseInt(watchTimeResult.rows[0]?.total_watch_time_seconds || 0);
+    const newUsersThisMonth = parseInt(newUsersResult.rows[0]?.new_users_this_month || 0);
+    const enrollmentsThisMonth = parseInt(enrollmentsThisMonthResult.rows[0]?.enrollments_this_month || 0);
+
+    // Calculate user growth percentage
+    const userGrowthData = userGrowthResult.rows[0];
+    const currentMonthUsers = parseInt(userGrowthData?.current_month || 0);
+    const lastMonthUsers = parseInt(userGrowthData?.last_month || 0);
+    let userGrowth = "+0.0%";
+    if (lastMonthUsers > 0) {
+      const growthPercent = ((currentMonthUsers - lastMonthUsers) / lastMonthUsers) * 100;
+      userGrowth = `${growthPercent >= 0 ? '+' : ''}${growthPercent.toFixed(1)}%`;
+    } else if (currentMonthUsers > 0) {
+      userGrowth = "+100.0%";
+    }
+
+    // Calculate enrollment growth percentage
+    const enrollmentGrowthData = enrollmentGrowthResult.rows[0];
+    const currentMonthEnrollments = parseInt(enrollmentGrowthData?.current_month || 0);
+    const lastMonthEnrollments = parseInt(enrollmentGrowthData?.last_month || 0);
+    let enrollmentGrowth = "+0.0%";
+    if (lastMonthEnrollments > 0) {
+      const growthPercent = ((currentMonthEnrollments - lastMonthEnrollments) / lastMonthEnrollments) * 100;
+      enrollmentGrowth = `${growthPercent >= 0 ? '+' : ''}${growthPercent.toFixed(1)}%`;
+    } else if (currentMonthEnrollments > 0) {
+      enrollmentGrowth = "+100.0%";
+    }
+
+    // Calculate completion rate
+    const completionRateData = completionRateResult.rows[0];
+    const totalEnrollmentsForRate = parseInt(completionRateData?.total || 0);
+    const completedEnrollments = parseInt(completionRateData?.completed || 0);
+    const completionRate = totalEnrollmentsForRate > 0 
+      ? `${((completedEnrollments / totalEnrollmentsForRate) * 100).toFixed(1)}%`
+      : "0.0%";
+
+    // Calculate average rating
+    const avgRating = parseFloat(averageRatingResult.rows[0]?.average_rating || 0);
+    const averageRating = avgRating.toFixed(1);
+
+    // Format watch time (convert seconds to hours and minutes)
+    const hours = Math.floor(totalWatchTimeSeconds / 3600);
+    const minutes = Math.floor((totalWatchTimeSeconds % 3600) / 60);
+    const totalWatchTime = `${hours}h ${minutes}m`;
+
+    res.json({
+      success: true,
+      data: {
+        totalUsers,
+        verifiedUsers,
+        totalTopics,
+        totalEnrollments,
+        enrolledTopics: totalEnrollments, // Same as totalEnrollments
+        completedTopics,
+        topicsInProgress,
+        totalWatchTime,
+        totalWatchTimeSeconds,
+        newUsersThisMonth,
+        enrollmentsThisMonth,
+        userGrowth,
+        enrollmentGrowth,
+        completionRate,
+        averageRating
+      }
+    });
+
+  } catch (err) {
+    console.error('Error in GET /dashboard/overview:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/dashboard/updates:
+ *   get:
+ *     summary: Get dashboard updates with user enrollments and subscriptions
+ *     tags: [Dashboard]
+ *     parameters:
+ *       - in: query
+ *         name: tab
+ *         schema:
+ *           type: string
+ *           enum: [enrolled, subscription]
+ *         description: Filter by tab type (enrolled or subscription)
+ *         example: enrolled
+ *       - in: query
+ *         name: month
+ *         schema:
+ *           type: string
+ *         description: Filter by month (e.g., '2024-12' for December 2024)
+ *         example: '2024-12'
+ *       - in: query
+ *         name: fromDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Start date for custom date range (YYYY-MM-DD)
+ *         example: '2024-12-01'
+ *       - in: query
+ *         name: toDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: End date for custom date range (YYYY-MM-DD)
+ *         example: '2024-12-31'
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number for pagination
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Number of items per page
+ *     responses:
+ *       200:
+ *         description: User enrollments/subscriptions retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: integer
+ *                       userId:
+ *                         type: integer
+ *                       userName:
+ *                         type: string
+ *                       userEmail:
+ *                         type: string
+ *                       topicId:
+ *                         type: integer
+ *                       topicTitle:
+ *                         type: string
+ *                       paymentStatus:
+ *                         type: string
+ *                       enrolledAt:
+ *                         type: string
+ *                         format: date-time
+ *                       progress:
+ *                         type: integer
+ *                       watchTime:
+ *                         type: string
+ *                       subscriptionStartDate:
+ *                         type: string
+ *                         format: date-time
+ *                         description: Subscription start date (for completed/subscription status)
+ *                       subscriptionEndDate:
+ *                         type: string
+ *                         format: date-time
+ *                         description: Subscription end date (1 year from start)
+ *                       subscriptionValidDays:
+ *                         type: integer
+ *                         description: Number of days remaining in subscription
+ *                       isSubscriptionActive:
+ *                         type: boolean
+ *                         description: Whether subscription is currently active
+ *                 pagination:
+ *                   type: object
+ *                   properties:
+ *                     currentPage:
+ *                       type: integer
+ *                     totalPages:
+ *                       type: integer
+ *                     totalCount:
+ *                       type: integer
+ *                     limit:
+ *                       type: integer
+ *                 filters:
+ *                   type: object
+ *                   properties:
+ *                     tab:
+ *                       type: string
+ *                     month:
+ *                       type: string
+ *                     fromDate:
+ *                       type: string
+ *                     toDate:
+ *                       type: string
+ */
+// GET /api/dashboard/updates - Get user enrollments and subscriptions with filters
+router.get('/dashboard/updates', async (req, res) => {
+  try {
+    const { 
+      tab = 'enrolled', 
+      month, 
+      fromDate, 
+      toDate,
+      page = 1,
+      limit = 20
+    } = req.query;
+
+    // Validate tab
+    if (!['enrolled', 'subscription'].includes(tab)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid tab. Must be either "enrolled" or "subscription"'
+      });
+    }
+
+    const offset = (page - 1) * limit;
+    const whereConditions = [];
+    const queryParams = [];
+    let paramCount = 1;
+
+    // Build WHERE conditions based on tab
+    if (tab === 'enrolled') {
+      whereConditions.push(`ut.payment_status IN ('completed', 'active', 'pending', 'processing')`);
+    } else if (tab === 'subscription') {
+      whereConditions.push(`ut.payment_status = 'subscription'`);
+    }
+
+    // Date filtering priority: custom date range > month filter
+    if (fromDate && toDate) {
+      // Custom date range
+      whereConditions.push(`DATE(ut.enrolled_at) BETWEEN $${paramCount} AND $${paramCount + 1}`);
+      queryParams.push(fromDate, toDate);
+      paramCount += 2;
+    } else if (month) {
+      // Month filter (format: YYYY-MM)
+      whereConditions.push(`TO_CHAR(ut.enrolled_at, 'YYYY-MM') = $${paramCount}`);
+      queryParams.push(month);
+      paramCount += 1;
+    }
+
+    const whereClause = whereConditions.length > 0 
+      ? `WHERE ${whereConditions.join(' AND ')}`
+      : '';
+
+    // Main query to get user enrollments with topic and user details
+    const dataQuery = `
+      SELECT 
+        ut.id,
+        ut.user_id,
+        u.name as user_name,
+        u.email as user_email,
+        ut.topic_id,
+        t.title as topic_title,
+        ut.payment_status,
+        ut.enrolled_at,
+        ut.created_at,
+        COALESCE(utp.total_progress, 0) as total_progress,
+        COALESCE(utp.total_watch_time, 0) as total_watch_time,
+        COUNT(*) OVER() as total_count
+      FROM user_topics ut
+      LEFT JOIN users u ON ut.user_id = u.id
+      LEFT JOIN topics t ON ut.topic_id = t.id
+      LEFT JOIN (
+        SELECT 
+          user_id,
+          topic_id,
+          AVG(progress) as total_progress,
+          SUM(watch_time) as total_watch_time
+        FROM user_topic_progress
+        GROUP BY user_id, topic_id
+      ) utp ON ut.user_id = utp.user_id AND ut.topic_id = utp.topic_id
+      ${whereClause}
+      ORDER BY ut.enrolled_at DESC
+      LIMIT $${paramCount} OFFSET $${paramCount + 1}
+    `;
+
+    queryParams.push(parseInt(limit), offset);
+
+    // Execute query
+    const result = await req.pool.query(dataQuery, queryParams);
+
+    // Format the results
+    const totalCount = result.rows.length > 0 ? parseInt(result.rows[0].total_count) : 0;
+    const totalPages = Math.ceil(totalCount / limit);
+
+    // Format watch time (seconds to hours and minutes)
+    const formatWatchTime = (seconds) => {
+      if (!seconds || seconds === 0) return '0h 0m';
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      return `${hours}h ${minutes}m`;
+    };
+
+    // Calculate subscription validity (1 year from purchase date)
+    const calculateSubscriptionValidity = (enrolledDate, paymentStatus) => {
+      if (!enrolledDate || !['completed', 'subscription'].includes(paymentStatus)) {
+        return {
+          subscriptionStartDate: null,
+          subscriptionEndDate: null,
+          subscriptionValidDays: null,
+          isSubscriptionActive: false
+        };
+      }
+
+      const startDate = new Date(enrolledDate);
+      const endDate = new Date(startDate);
+      endDate.setFullYear(endDate.getFullYear() + 1); // Add 1 year
+
+      const today = new Date();
+      const validDays = Math.max(0, Math.ceil((endDate - today) / (1000 * 60 * 60 * 24)));
+      const isActive = today >= startDate && today <= endDate;
+
+      return {
+        subscriptionStartDate: startDate.toISOString(),
+        subscriptionEndDate: endDate.toISOString(),
+        subscriptionValidDays: validDays,
+        isSubscriptionActive: isActive
+      };
+    };
+
+    const formattedData = result.rows.map(row => {
+      const subscriptionInfo = calculateSubscriptionValidity(row.enrolled_at, row.payment_status);
+      
+      return {
+        id: row.id,
+        userId: row.user_id,
+        userName: row.user_name || 'N/A',
+        userEmail: row.user_email || 'N/A',
+        topicId: row.topic_id,
+        topicTitle: row.topic_title || 'Untitled Topic',
+        paymentStatus: row.payment_status,
+        enrolledAt: row.enrolled_at ? row.enrolled_at.toISOString() : null,
+        progress: Math.round(parseFloat(row.total_progress || 0)),
+        watchTime: formatWatchTime(row.total_watch_time),
+        watchTimeSeconds: parseInt(row.total_watch_time || 0),
+        ...subscriptionInfo
+      };
+    });
+
+    res.json({
+      success: true,
+      data: formattedData,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages,
+        totalCount,
+        limit: parseInt(limit),
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1
+      },
+      filters: {
+        tab,
+        month: month || null,
+        fromDate: fromDate || null,
+        toDate: toDate || null
+      }
+    });
+
+  } catch (err) {
+    console.error('Error in GET /dashboard/updates:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/dashboard/earnings:
+ *   get:
+ *     summary: Get monthly earnings data based on successful payments
+ *     tags: [Dashboard]
+ *     parameters:
+ *       - in: query
+ *         name: year
+ *         schema:
+ *           type: integer
+ *         description: Year for earnings data (default is current year)
+ *         example: 2024
+ *       - in: query
+ *         name: months
+ *         schema:
+ *           type: integer
+ *           default: 12
+ *         description: Number of months to retrieve (1-12)
+ *         example: 7
+ *     responses:
+ *       200:
+ *         description: Monthly earnings data retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       month:
+ *                         type: string
+ *                         example: "Jan"
+ *                       value:
+ *                         type: number
+ *                         description: Total earnings for the month (in dollars/currency)
+ *                         example: 1250.50
+ *                       count:
+ *                         type: integer
+ *                         description: Number of successful payments
+ *                         example: 25
+ *                 summary:
+ *                   type: object
+ *                   properties:
+ *                     totalEarnings:
+ *                       type: number
+ *                       description: Total earnings for the period
+ *                     totalTransactions:
+ *                       type: integer
+ *                       description: Total number of successful transactions
+ *                     year:
+ *                       type: integer
+ *                     monthsIncluded:
+ *                       type: integer
+ */
+// GET /api/dashboard/earnings - Get monthly earnings data
+router.get('/dashboard/earnings', async (req, res) => {
+  try {
+    const currentYear = new Date().getFullYear();
+    const { 
+      year = currentYear,
+      months = 12
+    } = req.query;
+
+    // Validate months parameter
+    const numMonths = Math.min(Math.max(parseInt(months) || 12, 1), 12);
+    const targetYear = parseInt(year) || currentYear;
+
+    // Query to get monthly earnings (revenue) from user_topics with successful payments
+    const earningsQuery = `
+      SELECT 
+        TO_CHAR(ut.enrolled_at, 'Mon') as month_name,
+        EXTRACT(MONTH FROM ut.enrolled_at) as month_number,
+        COALESCE(SUM(t.price), 0) as total_earnings
+      FROM user_topics ut
+      LEFT JOIN topics t ON ut.topic_id = t.id
+      WHERE ut.payment_status IN ('completed', 'paid', 'subscription')
+        AND EXTRACT(YEAR FROM ut.enrolled_at) = $1
+        AND EXTRACT(MONTH FROM ut.enrolled_at) <= $2
+      GROUP BY month_name, month_number
+      ORDER BY month_number ASC
+    `;
+
+    const result = await req.pool.query(earningsQuery, [targetYear, numMonths]);
+
+    // Month names for formatting
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    // Create a map of existing data
+    const dataMap = {};
+    result.rows.forEach(row => {
+      const monthIndex = parseInt(row.month_number) - 1;
+      dataMap[monthIndex] = {
+        month: monthNames[monthIndex],
+        value: parseFloat(row.total_earnings || 0)
+      };
+    });
+
+    // Fill in missing months with zero values
+    const formattedData = [];
+    for (let i = 0; i < numMonths; i++) {
+      if (dataMap[i]) {
+        formattedData.push({
+          month: monthNames[i],
+          value: parseFloat(dataMap[i].value.toFixed(2))
+        });
+      } else {
+        formattedData.push({
+          month: monthNames[i],
+          value: 0
+        });
+      }
+    }
+
+    res.json(formattedData);
+
+  } catch (err) {
+    console.error('Error in GET /dashboard/earnings:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/dashboard/reports/monthly:
+ *   get:
+ *     summary: Get monthly growth report showing increased amounts
+ *     tags: [Dashboard]
+ *     parameters:
+ *       - in: query
+ *         name: year
+ *         schema:
+ *           type: integer
+ *         description: Year for report (default is current year)
+ *         example: 2025
+ *       - in: query
+ *         name: months
+ *         schema:
+ *           type: integer
+ *           default: 12
+ *         description: Number of months to retrieve (1-12)
+ *         example: 12
+ *     responses:
+ *       200:
+ *         description: Monthly growth report retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       month:
+ *                         type: string
+ *                         example: "Jan"
+ *                       users:
+ *                         type: integer
+ *                         description: New users registered this month
+ *                         example: 15
+ *                       enrollments:
+ *                         type: integer
+ *                         description: New enrollments this month
+ *                         example: 45
+ *                       revenue:
+ *                         type: number
+ *                         description: Revenue earned this month
+ *                         example: 1250.50
+ *                       growth:
+ *                         type: string
+ *                         description: Percentage growth compared to previous month
+ *                         example: "+25.5%"
+ */
+// GET /api/dashboard/reports/monthly - Get monthly growth report
+router.get('/dashboard/reports/monthly', async (req, res) => {
+  try {
+    const currentYear = new Date().getFullYear();
+    const { 
+      year = currentYear,
+      months = 12
+    } = req.query;
+
+    const numMonths = Math.min(Math.max(parseInt(months) || 12, 1), 12);
+    const targetYear = parseInt(year) || currentYear;
+
+    // Query to get monthly data
+    const monthlyQuery = `
+      WITH monthly_stats AS (
+        SELECT 
+          EXTRACT(MONTH FROM enrolled_at) as month_number,
+          COUNT(*) as enrollments,
+          COALESCE(SUM(t.price), 0) as revenue
+        FROM user_topics ut
+        LEFT JOIN topics t ON ut.topic_id = t.id
+        WHERE ut.payment_status IN ('completed', 'paid', 'subscription')
+          AND EXTRACT(YEAR FROM ut.enrolled_at) = $1
+          AND EXTRACT(MONTH FROM ut.enrolled_at) <= $2
+        GROUP BY month_number
+      ),
+      monthly_users AS (
+        SELECT 
+          EXTRACT(MONTH FROM created_at) as month_number,
+          COUNT(*) as new_users
+        FROM users
+        WHERE EXTRACT(YEAR FROM created_at) = $1
+          AND EXTRACT(MONTH FROM created_at) <= $2
+        GROUP BY month_number
+      )
+      SELECT 
+        COALESCE(ms.month_number, mu.month_number) as month_number,
+        COALESCE(mu.new_users, 0) as users,
+        COALESCE(ms.enrollments, 0) as enrollments,
+        COALESCE(ms.revenue, 0) as revenue
+      FROM monthly_stats ms
+      FULL OUTER JOIN monthly_users mu ON ms.month_number = mu.month_number
+      ORDER BY month_number ASC
+    `;
+
+    const result = await req.pool.query(monthlyQuery, [targetYear, numMonths]);
+
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    // Create data map
+    const dataMap = {};
+    result.rows.forEach(row => {
+      const monthIndex = parseInt(row.month_number) - 1;
+      dataMap[monthIndex] = {
+        users: parseInt(row.users || 0),
+        enrollments: parseInt(row.enrollments || 0),
+        revenue: parseFloat(row.revenue || 0)
+      };
+    });
+
+    // Fill in missing months and calculate growth
+    const formattedData = [];
+    let previousMonthEnrollments = 0;
+
+    for (let i = 0; i < numMonths; i++) {
+      const currentData = dataMap[i] || { users: 0, enrollments: 0, revenue: 0 };
+      
+      // Calculate growth percentage compared to previous month
+      let growth = "+0.0%";
+      if (i > 0 && previousMonthEnrollments > 0) {
+        const growthPercent = ((currentData.enrollments - previousMonthEnrollments) / previousMonthEnrollments) * 100;
+        growth = `${growthPercent >= 0 ? '+' : ''}${growthPercent.toFixed(1)}%`;
+      } else if (i > 0 && currentData.enrollments > 0) {
+        growth = "+100.0%";
+      } else if (i === 0) {
+        growth = "N/A"; // First month has no comparison
+      }
+
+      formattedData.push({
+        month: monthNames[i],
+        users: currentData.users,
+        enrollments: currentData.enrollments,
+        revenue: parseFloat(currentData.revenue.toFixed(2)),
+        growth: growth
+      });
+
+      previousMonthEnrollments = currentData.enrollments;
+    }
+
+    res.json({
+      success: true,
+      data: formattedData
+    });
+
+  } catch (err) {
+    console.error('Error in GET /dashboard/reports/monthly:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/dashboard/reports/monthlyReport:
+ *   get:
+ *     summary: Get monthly report with earnings, topics, and enrollments for download
+ *     tags: [Dashboard]
+ *     parameters:
+ *       - in: query
+ *         name: segment
+ *         schema:
+ *           type: string
+ *           enum: [earnings, topics, enrolled]
+ *         required: true
+ *         description: Report segment to generate
+ *         example: earnings
+ *       - in: query
+ *         name: month
+ *         schema:
+ *           type: string
+ *         description: Month filter in YYYY-MM format
+ *         example: "2025-12"
+ *       - in: query
+ *         name: download
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: Set to true to download as CSV
+ *         example: false
+ *     responses:
+ *       200:
+ *         description: Monthly report retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 segment:
+ *                   type: string
+ *                   example: "earnings"
+ *                 month:
+ *                   type: string
+ *                   example: "Dec 2025"
+ *                 totalPaymentTransactions:
+ *                   type: integer
+ *                   example: 2800
+ *                 totalTopics:
+ *                   type: integer
+ *                   example: 5000
+ *                 totalEnrolled:
+ *                   type: integer
+ *                   example: 1200
+ *                 totalSubscribed:
+ *                   type: integer
+ *                   example: 2000
+ *                 data:
+ *                   type: array
+ */
+// GET /api/dashboard/reports/monthlyReport - Generate monthly report by segment
+router.get('/dashboard/reports/monthlyReport', async (req, res) => {
+  try {
+    const { segment, month, download } = req.query;
+
+    if (!segment || !['earnings', 'topics', 'enrolled'].includes(segment)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valid segment parameter required: earnings, topics, or enrolled'
+      });
+    }
+
+    const shouldDownload = download === 'true' || download === true;
+    let whereClause = '';
+    let monthDisplay = 'All Time';
+
+    // Apply month filter if provided
+    if (month) {
+      const [year, monthNum] = month.split('-');
+      if (year && monthNum) {
+        whereClause = `AND EXTRACT(YEAR FROM ut.enrolled_at) = ${parseInt(year)} AND EXTRACT(MONTH FROM ut.enrolled_at) = ${parseInt(monthNum)}`;
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        monthDisplay = `${monthNames[parseInt(monthNum) - 1]} ${year}`;
+      }
+    }
+
+    let reportData = [];
+    let totals = {
+      totalPaymentTransactions: 0,
+      totalTopics: 0,
+      totalEnrolled: 0,
+      totalSubscribed: 0
+    };
+
+    if (segment === 'earnings') {
+      // Earnings Report - Payment transactions with revenue
+      const earningsQuery = `
+        SELECT 
+          u.id as user_id,
+          u.name as user_name,
+          u.email as user_email,
+          t.id as topic_id,
+          t.title as topic_title,
+          ut.payment_status,
+          ut.enrolled_at,
+          COALESCE(t.price, 0) as amount,
+          CASE 
+            WHEN ut.payment_status IN ('completed', 'paid') THEN 'Success'
+            WHEN ut.payment_status = 'pending' THEN 'Pending'
+            ELSE 'Other'
+          END as transaction_status
+        FROM user_topics ut
+        JOIN users u ON ut.user_id = u.id
+        JOIN topics t ON ut.topic_id = t.id
+        WHERE ut.payment_status IN ('completed', 'paid', 'pending')
+        ${whereClause}
+        ORDER BY ut.enrolled_at DESC
+      `;
+
+      const result = await req.pool.query(earningsQuery);
+      reportData = result.rows.map(row => ({
+        userId: row.user_id,
+        userName: row.user_name,
+        userEmail: row.user_email,
+        topicId: row.topic_id,
+        topicTitle: row.topic_title,
+        amount: parseFloat(row.amount),
+        transactionStatus: row.transaction_status,
+        paymentStatus: row.payment_status,
+        date: row.enrolled_at
+      }));
+
+      // Get totals for earnings
+      const totalQuery = `
+        SELECT 
+          COUNT(*) as total_transactions,
+          COUNT(DISTINCT ut.topic_id) as total_topics,
+          COUNT(CASE WHEN ut.payment_status IN ('completed', 'paid', 'pending') THEN 1 END) as total_enrolled,
+          COUNT(CASE WHEN ut.payment_status = 'subscription' THEN 1 END) as total_subscribed
+        FROM user_topics ut
+        WHERE ut.payment_status IN ('completed', 'paid', 'pending', 'subscription')
+        ${whereClause}
+      `;
+      const totalResult = await req.pool.query(totalQuery);
+      if (totalResult.rows.length > 0) {
+        totals.totalPaymentTransactions = parseInt(totalResult.rows[0].total_transactions || 0);
+        totals.totalTopics = parseInt(totalResult.rows[0].total_topics || 0);
+        totals.totalEnrolled = parseInt(totalResult.rows[0].total_enrolled || 0);
+        totals.totalSubscribed = parseInt(totalResult.rows[0].total_subscribed || 0);
+      }
+
+    } else if (segment === 'topics') {
+      // Topics Report - All topics with enrollment counts
+      const topicsQuery = `
+        SELECT 
+          t.id as topic_id,
+          t.title as topic_title,
+          t.description,
+          COALESCE(t.price, 0) as price,
+          COUNT(DISTINCT ut.user_id) FILTER (WHERE ut.payment_status IN ('completed', 'paid', 'pending', 'subscription')) as total_enrollments,
+          COUNT(DISTINCT ut.user_id) FILTER (WHERE ut.payment_status IN ('completed', 'paid')) as completed_enrollments,
+          COALESCE(AVG(utp.progress), 0) as average_progress
+        FROM topics t
+        LEFT JOIN user_topics ut ON t.id = ut.topic_id ${whereClause.replace('ut.enrolled_at', 'enrolled_at')}
+        LEFT JOIN user_topic_progress utp ON t.id = utp.topic_id
+        GROUP BY t.id, t.title, t.description, t.price
+        ORDER BY total_enrollments DESC
+      `;
+
+      const result = await req.pool.query(topicsQuery);
+      reportData = result.rows.map(row => ({
+        topicId: row.topic_id,
+        topicTitle: row.topic_title,
+        description: row.description,
+        price: parseFloat(row.price),
+        totalEnrollments: parseInt(row.total_enrollments || 0),
+        completedEnrollments: parseInt(row.completed_enrollments || 0),
+        averageProgress: parseFloat(row.average_progress || 0).toFixed(1)
+      }));
+
+      // Get totals for topics
+      const totalQuery = `
+        SELECT 
+          COUNT(DISTINCT t.id) as total_topics,
+          COUNT(DISTINCT ut.user_id) FILTER (WHERE ut.payment_status IN ('completed', 'paid', 'pending')) as total_enrolled,
+          COUNT(DISTINCT CASE WHEN ut.payment_status IN ('completed', 'paid') THEN ut.id END) as total_transactions,
+          COUNT(DISTINCT CASE WHEN ut.payment_status = 'subscription' THEN ut.user_id END) as total_subscribed
+        FROM topics t
+        LEFT JOIN user_topics ut ON t.id = ut.topic_id ${whereClause.replace('ut.enrolled_at', 'enrolled_at')}
+      `;
+      const totalResult = await req.pool.query(totalQuery);
+      if (totalResult.rows.length > 0) {
+        totals.totalTopics = parseInt(totalResult.rows[0].total_topics || 0);
+        totals.totalEnrolled = parseInt(totalResult.rows[0].total_enrolled || 0);
+        totals.totalPaymentTransactions = parseInt(totalResult.rows[0].total_transactions || 0);
+        totals.totalSubscribed = parseInt(totalResult.rows[0].total_subscribed || 0);
+      }
+
+    } else if (segment === 'enrolled') {
+      // Enrolled Report - Users with their enrollments
+      const enrolledQuery = `
+        SELECT 
+          u.id as user_id,
+          u.name as user_name,
+          u.email as user_email,
+          t.id as topic_id,
+          t.title as topic_title,
+          ut.payment_status,
+          ut.enrolled_at,
+          COALESCE(utp.progress, 0) as progress,
+          COALESCE(utp.watch_time, 0) as watch_time,
+          CASE 
+            WHEN ut.payment_status IN ('completed', 'paid') THEN 'Active'
+            WHEN ut.payment_status = 'pending' THEN 'Pending'
+            ELSE 'Other'
+          END as enrollment_status
+        FROM user_topics ut
+        JOIN users u ON ut.user_id = u.id
+        JOIN topics t ON ut.topic_id = t.id
+        LEFT JOIN user_topic_progress utp ON ut.user_id = utp.user_id AND ut.topic_id = utp.topic_id
+        WHERE ut.payment_status IN ('completed', 'paid', 'pending', 'active', 'processing')
+        ${whereClause}
+        ORDER BY ut.enrolled_at DESC
+      `;
+
+      const result = await req.pool.query(enrolledQuery);
+      reportData = result.rows.map(row => ({
+        userId: row.user_id,
+        userName: row.user_name,
+        userEmail: row.user_email,
+        topicId: row.topic_id,
+        topicTitle: row.topic_title,
+        paymentStatus: row.payment_status,
+        enrollmentStatus: row.enrollment_status,
+        progress: parseFloat(row.progress || 0).toFixed(1),
+        watchTime: parseInt(row.watch_time || 0),
+        enrolledAt: row.enrolled_at
+      }));
+
+      // Get totals for enrolled
+      const totalQuery = `
+        SELECT 
+          COUNT(*) as total_enrolled,
+          COUNT(DISTINCT ut.topic_id) as total_topics,
+          COUNT(CASE WHEN ut.payment_status IN ('completed', 'paid') THEN 1 END) as total_transactions,
+          COUNT(CASE WHEN ut.payment_status = 'subscription' THEN 1 END) as total_subscribed
+        FROM user_topics ut
+        WHERE ut.payment_status IN ('completed', 'paid', 'pending', 'active', 'processing', 'subscription')
+        ${whereClause}
+      `;
+      const totalResult = await req.pool.query(totalQuery);
+      if (totalResult.rows.length > 0) {
+        totals.totalEnrolled = parseInt(totalResult.rows[0].total_enrolled || 0);
+        totals.totalTopics = parseInt(totalResult.rows[0].total_topics || 0);
+        totals.totalPaymentTransactions = parseInt(totalResult.rows[0].total_transactions || 0);
+        totals.totalSubscribed = parseInt(totalResult.rows[0].total_subscribed || 0);
+      }
+    }
+
+    // Download as CSV
+    if (shouldDownload) {
+      let csvContent = '';
+      let filename = `${segment}_report_${monthDisplay.replace(' ', '_')}.csv`;
+
+      if (segment === 'earnings') {
+        csvContent = 'User ID,User Name,User Email,Topic ID,Topic Title,Amount,Transaction Status,Payment Status,Date\n';
+        reportData.forEach(row => {
+          csvContent += `${row.userId},"${row.userName}","${row.userEmail}",${row.topicId},"${row.topicTitle}",${row.amount},${row.transactionStatus},${row.paymentStatus},${row.date}\n`;
+        });
+      } else if (segment === 'topics') {
+        csvContent = 'Topic ID,Topic Title,Description,Price,Total Enrollments,Completed Enrollments,Average Progress\n';
+        reportData.forEach(row => {
+          csvContent += `${row.topicId},"${row.topicTitle}","${row.description || ''}",${row.price},${row.totalEnrollments},${row.completedEnrollments},${row.averageProgress}\n`;
+        });
+      } else if (segment === 'enrolled') {
+        csvContent = 'User ID,User Name,User Email,Topic ID,Topic Title,Payment Status,Enrollment Status,Progress,Watch Time (seconds),Enrolled At\n';
+        reportData.forEach(row => {
+          csvContent += `${row.userId},"${row.userName}","${row.userEmail}",${row.topicId},"${row.topicTitle}",${row.paymentStatus},${row.enrollmentStatus},${row.progress},${row.watchTime},${row.enrolledAt}\n`;
+        });
+      }
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      return res.send(csvContent);
+    }
+
+    // Return JSON response
+    res.json({
+      success: true,
+      data: {
+        segment: segment,
+        month: monthDisplay,
+        totalPaymentTransactions: totals.totalPaymentTransactions,
+        totalTopics: totals.totalTopics,
+        totalEnrolled: totals.totalEnrolled,
+        totalSubscribed: totals.totalSubscribed,
+        reportData: reportData
+      }
+    });
+
+  } catch (err) {
+    console.error('Error in GET /dashboard/reports/monthlyReport:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error'
+    });
+  }
+});
+
+/**
+ * @swagger
  * components:
  *   schemas:
  *     Homepage:
