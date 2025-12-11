@@ -1,28 +1,12 @@
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs').promises;
 const crypto = require('crypto');
+const { uploadToS3, deleteFromS3 } = require('../utils/s3-helper');
 const router = express.Router();
 
-// Configure multer for video uploads
-const storage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    const uploadPath = path.join(__dirname, '../../uploads', 'video');
-    try {
-      await fs.mkdir(uploadPath, { recursive: true });
-      cb(null, uploadPath);
-    } catch (error) {
-      cb(error, null);
-    }
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + crypto.randomBytes(6).toString('hex');
-    const ext = path.extname(file.originalname);
-    const name = path.basename(file.originalname, ext);
-    cb(null, `${name}-${uniqueSuffix}${ext}`);
-  }
-});
+// Configure multer for memory storage (S3 upload)
+const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
   const allowedTypes = ['video/mp4', 'video/webm', 'video/avi', 'video/mov', 'video/wmv'];
@@ -37,21 +21,15 @@ const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 500 * 1024 * 1024 // 500MB max
+    fileSize: 1000 * 1024 * 1024 // 1GB max (S3 supports larger files)
   }
 });
 
-// Helper function to get file URL
-const getFileUrl = (req, filename) => {
-  const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
-  return `${baseUrl}/uploads/video/${filename}`;
-};
-
 // Helper function to validate file size
 const validateFileSize = (file) => {
-  const maxSize = 500 * 1024 * 1024; // 500MB
+  const maxSize = 1000 * 1024 * 1024; // 1GB
   if (file.size > maxSize) {
-    throw new Error(`File too large. Maximum size: 500MB`);
+    throw new Error(`File too large. Maximum size: 1GB`);
   }
 };
 
@@ -624,10 +602,13 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
       }
     }
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'videos');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -710,7 +691,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          fileData.url, // Use the URL instead of file path for consistency
+          fileData.url,
           fileData.size,
           fileData.mimeType,
           'video',
@@ -831,15 +812,18 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
       try {
         validateFileSize(file);
 
+        // Upload to S3
+        const s3Result = await uploadToS3(file.buffer, file.originalname, file.mimetype, 'videos');
+
         const fileData = {
           id: crypto.randomUUID(),
-          url: getFileUrl(req, file.filename),
-          filename: file.filename,
+          url: s3Result.url,
+          filename: s3Result.key,
           originalName: file.originalname,
           size: file.size,
           mimeType: file.mimetype,
           uploadedAt: new Date().toISOString(),
-          title: req.body.titles?.[i] || path.basename(file.originalname, path.extname(file.originalname)),
+          title: req.body.titles?.[i] || file.originalname.replace(/\.[^/.]+$/, ''),
           description: req.body.descriptions?.[i] || '',
           duration: req.body.durations?.[i] || '0',
           order: parseInt(req.body.orders?.[i] || (i + 1)),

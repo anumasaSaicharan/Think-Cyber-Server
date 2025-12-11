@@ -4,8 +4,108 @@ const controller = {};
 // USERS CRUD
 controller.listUsers = async (req, res) => {
     try {
-        const result = await req.pool.query('SELECT * FROM users');
-        res.status(200).json({ success: true, data: result.rows });
+        const { page = 1, limit = 20, search = '', status = '', role = '' } = req.query;
+        const offset = (page - 1) * limit;
+        
+        let query = 'SELECT * FROM users WHERE 1=1';
+        let countQuery = 'SELECT COUNT(*) FROM users WHERE 1=1';
+        const params = [];
+        let paramIndex = 1;
+        
+        if (search) {
+            query += ` AND (name ILIKE $${paramIndex} OR email ILIKE $${paramIndex})`;
+            countQuery += ` AND (name ILIKE $${paramIndex} OR email ILIKE $${paramIndex})`;
+            params.push(`%${search}%`);
+            paramIndex++;
+        }
+        
+        if (status) {
+            query += ` AND status = $${paramIndex}`;
+            countQuery += ` AND status = $${paramIndex}`;
+            params.push(status);
+            paramIndex++;
+        }
+        
+        if (role) {
+            query += ` AND role = $${paramIndex}`;
+            countQuery += ` AND role = $${paramIndex}`;
+            params.push(role);
+            paramIndex++;
+        }
+        
+        query += ` ORDER BY created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+        
+        const [result, countResult] = await Promise.all([
+            req.pool.query(query, [...params, limit, offset]),
+            req.pool.query(countQuery, params)
+        ]);
+        
+        const total = parseInt(countResult.rows[0].count);
+        
+        res.status(200).json({ 
+            success: true, 
+            data: {
+                users: result.rows,
+                pagination: {
+                    page: parseInt(page),
+                    limit: parseInt(limit),
+                    total: total,
+                    totalPages: Math.ceil(total / limit)
+                }
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+};
+
+controller.getUserStats = async (req, res) => {
+    try {
+        const statsQuery = `
+            SELECT 
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE status = 'active') as active,
+                COUNT(*) FILTER (WHERE status = 'inactive') as inactive,
+                COUNT(*) FILTER (WHERE status = 'pending') as pending,
+                COUNT(*) FILTER (WHERE status = 'suspended') as suspended,
+                COUNT(*) FILTER (WHERE role = 'student') as students,
+                COUNT(*) FILTER (WHERE role = 'instructor') as instructors,
+                COUNT(*) FILTER (WHERE role = 'admin') as admins,
+                COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE - INTERVAL '30 days') as new_this_month,
+                COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE - INTERVAL '7 days') as new_this_week,
+                COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) as new_today
+            FROM users
+        `;
+        
+        const result = await req.pool.query(statsQuery);
+        const stats = result.rows[0];
+        
+        res.status(200).json({ 
+            success: true, 
+            data: {
+                totalUsers: parseInt(stats.total) || 0,
+                activeUsers: parseInt(stats.active) || 0,
+                inactiveUsers: parseInt(stats.inactive) || 0,
+                pendingUsers: parseInt(stats.pending) || 0,
+                suspendedUsers: parseInt(stats.suspended) || 0,
+                newThisMonth: parseInt(stats.new_this_month) || 0,
+                newThisWeek: parseInt(stats.new_this_week) || 0,
+                newToday: parseInt(stats.new_today) || 0,
+                averageEnrollments: 0,
+                totalEnrollments: 0,
+                totalWatchTime: 0,
+                trends: {
+                    totalUsers: { value: '+0%', type: 'stable' },
+                    activeUsers: { value: '+0%', type: 'stable' },
+                    newUsers: { value: '+0%', type: 'stable' }
+                },
+                byRole: {
+                    student: parseInt(stats.students) || 0,
+                    instructor: parseInt(stats.instructors) || 0,
+                    admin: parseInt(stats.admins) || 0
+                }
+            }
+        });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }

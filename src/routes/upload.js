@@ -1,31 +1,11 @@
 const express = require('express');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs').promises;
 const crypto = require('crypto');
+const { uploadToS3, deleteFromS3 } = require('../utils/s3-helper');
 const router = express.Router();
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    const uploadType = req.body.type || req.path.split('/')[1] || 'general';
-    const uploadPath = path.join(__dirname, '../../uploads', uploadType);
-    
-    try {
-      await fs.mkdir(uploadPath, { recursive: true });
-      cb(null, uploadPath);
-    } catch (error) {
-      cb(error, null);
-    }
-  },
-  filename: (req, file, cb) => {
-    // Generate unique filename
-    const uniqueSuffix = Date.now() + '-' + crypto.randomBytes(6).toString('hex');
-    const ext = path.extname(file.originalname);
-    const name = path.basename(file.originalname, ext);
-    cb(null, `${name}-${uniqueSuffix}${ext}`);
-  }
-});
+// Configure multer for memory storage (S3 upload)
+const storage = multer.memoryStorage();
 
 // File type validation
 const fileFilter = (req, file, cb) => {
@@ -49,7 +29,7 @@ const fileFilter = (req, file, cb) => {
 // File size limits (in bytes)
 const fileLimits = {
   image: 10 * 1024 * 1024, // 10MB
-  video: 500 * 1024 * 1024, // 500MB
+  video: 1000 * 1024 * 1024, // 1GB (S3 supports larger files)
   document: 50 * 1024 * 1024, // 50MB
   thumbnail: 5 * 1024 * 1024 // 5MB
 };
@@ -58,15 +38,9 @@ const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 500 * 1024 * 1024 // 500MB max (will be overridden per route)
+    fileSize: 1000 * 1024 * 1024 // 1GB max
   }
 });
-
-// Helper function to get file URL
-const getFileUrl = (req, filename, type) => {
-  const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
-  return `${baseUrl}/uploads/${type}/${filename}`;
-};
 
 // Helper function to validate file size for specific type
 const validateFileSize = (file, type) => {
@@ -152,10 +126,13 @@ router.post('/image', upload.single('image'), async (req, res) => {
 
     validateFileSize(req.file, 'image');
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'images');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename, 'image'),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -174,7 +151,7 @@ router.post('/image', upload.single('image'), async (req, res) => {
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          req.file.path,
+          s3Result.url,
           fileData.size,
           fileData.mimeType,
           fileData.type,
@@ -189,7 +166,7 @@ router.post('/image', upload.single('image'), async (req, res) => {
     res.json({
       success: true,
       data: fileData,
-      message: 'Image uploaded successfully'
+      message: 'Image uploaded successfully to S3'
     });
 
   } catch (error) {

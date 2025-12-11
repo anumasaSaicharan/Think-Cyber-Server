@@ -185,6 +185,7 @@ const topicsActionsRoutes = require('./routes/topicsActions');
 const topicsModulesRoutes = require('./routes/topicsModules');
 const topicsVideosRoutes = require('./routes/topicsVideos');
 const uploadRoutes = require('./routes/upload');
+const uploadS3Routes = require('./routes/upload-s3');
 const authRouter = require('./routes/auth');
 const enrollmentRoutes = require('./routes/enrollment');
 
@@ -194,7 +195,7 @@ app.set('port', process.env.PORT || 8080);
 // middlewares
 app.use(morgan('dev'));
 const corsOptions = {
-  origin: 'http://localhost:5173', // your frontend URL
+  origin: ['http://localhost:5173', 'http://localhost:8082', 'http://localhost:3000'], // your frontend URLs
   credentials: true
 };
 app.use(cors(corsOptions));
@@ -208,7 +209,7 @@ app.use((req, res, next) => {
 });
 
 // Routes
-app.use('/', customerRoutes);
+app.use('/api', customerRoutes);
 app.use('/api', categoryRoutes);
 app.use('/api', subcategoryRoutes);
 app.use('/api', termsConditionsRoutes);
@@ -219,6 +220,7 @@ app.use('/api', topicsActionsRoutes);
 app.use('/api', topicsModulesRoutes);
 app.use('/api', topicsVideosRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/upload-s3', uploadS3Routes);
 
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/auth', authRouter);

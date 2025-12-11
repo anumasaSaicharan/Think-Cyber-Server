@@ -1,65 +1,20 @@
 
 const express = require('express');
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { Pool } = require('pg');
 const pool = new Pool();
 const jwt = require('jsonwebtoken');
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
+
 const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
-/**
- * @swagger
- * /enrollments/verify-payment:
- *   post:
- *     summary: Verify Stripe payment and update enrollment status
- *     tags: [Enrollments]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               sessionId:
- *                 type: string
- *     responses:
- *       200:
- *         description: Payment verification result
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 topicId:
- *                   type: integer
- *                 error:
- *                   type: string
- */
-router.post('/verify-payment', async (req, res) => {
-  const { sessionId } = req.body;
-  try {
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    if (session.payment_status === 'paid') {
-      // Update user_topics table to set payment_status = 'completed'
-      const userId = session.metadata.user_id;
-      const topicId = session.metadata.topic_id;
-      await pool.query(
-        'UPDATE user_topics SET payment_status = $1 WHERE user_id = $2 AND topic_id = $3',
-        ['completed', userId, topicId]
-      );
-      // Fetch user data
-      const userRes = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
-      const user = userRes.rows[0];
-      // Generate JWT token
-      const sessionToken = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-      return res.json({ success: true, user, sessionToken, topicId });
-    }
-    res.json({ success: false });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+
+// Initialize Razorpay instance
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
+
 
 /**
  * @swagger
@@ -153,9 +108,9 @@ router.get('/check/:user_id/:topic_id', async (req, res) => {
 });
 /**
  * @swagger
- * /enrollments/enroll:
+ * /enrollments/create-order:
  *   post:
- *     summary: Enroll user to topic and create Stripe Checkout session
+ *     summary: Create Razorpay order for course enrollment
  *     tags: [Enrollments]
  *     requestBody:
  *       required: true
@@ -164,63 +119,93 @@ router.get('/check/:user_id/:topic_id', async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
- *               user_id:
+ *               userId:
  *                 type: integer
- *               topic_id:
+ *               topicId:
  *                 type: integer
+ *               email:
+ *                 type: string
+ *               currency:
+ *                 type: string
  *     responses:
  *       200:
- *         description: Stripe Checkout URL
+ *         description: Razorpay order created
  *         content:
  *           application/json:
  *             schema:
  *               type: object
  *               properties:
- *                 url:
+ *                 orderId:
+ *                   type: string
+ *                 amount:
+ *                   type: number
+ *                 currency:
+ *                   type: string
+ *                 keyId:
  *                   type: string
  */
-router.post('/enroll', async (req, res) => {
-  const { userId, topicId,email } = req.body;
-  console.log("Enroll request received:", req.body);
+router.post('/create-order', async (req, res) => {
+  const { userId, topicId, email, currency } = req.body;
+  console.log("Create order request received:", req.body);
+  
   try {
-    // Get topic price and name
-  const topic = await pool.query('SELECT id, title, price FROM topics WHERE id = $1', [topicId]);
-  if (!topic.rows.length) return res.status(404).json({ error: 'Topic not found' });
-  const { title, price } = topic.rows[0];
+    // Get topic details
+    const topic = await pool.query('SELECT id, title, price FROM topics WHERE id = $1', [topicId]);
+    if (!topic.rows.length) return res.status(404).json({ error: 'Topic not found' });
+    
+    const { title, price } = topic.rows[0];
 
-    // Create Stripe Checkout session
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      customer_email: email,
-      line_items: [{
-        price_data: {
-          currency: 'usd',
-          product_data: { name: title },
-          unit_amount: Math.round(Number(price) * 100),
-        },
-        quantity: 1,
-      }],
-      mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/payment-cancel`,
-      metadata: { user_id: String(userId), topic_id: String(topicId) },
+    // If free course, enroll directly
+    if (price === 0 || price === null) {
+      await pool.query(
+        'INSERT INTO user_topics (user_id, topic_id, payment_status) VALUES ($1, $2, $3) ON CONFLICT (user_id, topic_id) DO UPDATE SET payment_status = $3',
+        [userId, topicId, 'completed']
+      );
+      return res.json({ success: true, message: 'Successfully enrolled in the free course' });
+    }
+
+    // Convert price to smallest currency unit (paise for INR, cents for USD)
+    const amount = Math.round(Number(price) * 100);
+
+    // Create Razorpay order
+    const options = {
+      amount: amount,
+      currency: currency || 'INR',
+      receipt: `receipt_${topicId}_${userId}_${Date.now()}`,
+      notes: {
+        userId: String(userId),
+        topicId: String(topicId),
+        email: email,
+        courseName: title
+      }
+    };
+
+    const order = await razorpay.orders.create(options);
+
+    // Create pending enrollment record
+    await pool.query(
+      'INSERT INTO user_topics (user_id, topic_id, payment_status) VALUES ($1, $2, $3) ON CONFLICT (user_id, topic_id) DO UPDATE SET payment_status = $3',
+      [userId, topicId, 'pending']
+    );
+
+    res.json({
+      success: true,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      keyId: process.env.RAZORPAY_KEY_ID
     });
-
-    // Optionally, create a pending enrollment record here
-    await pool.query('INSERT INTO user_topics (user_id, topic_id, payment_status) VALUES ($1, $2, $3) ON CONFLICT (user_id, topic_id) DO NOTHING', [userId, topicId, 'pending']);
-
-    res.json({ url: session.url });
   } catch (err) {
+    console.error('Error creating Razorpay order:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-
 /**
  * @swagger
- * /enrollments/webhook:
+ * /enrollments/verify-payment:
  *   post:
- *     summary: Stripe webhook to handle payment events
+ *     summary: Verify Razorpay payment and complete enrollment
  *     tags: [Enrollments]
  *     requestBody:
  *       required: true
@@ -228,31 +213,114 @@ router.post('/enroll', async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
+ *             properties:
+ *               razorpay_order_id:
+ *                 type: string
+ *               razorpay_payment_id:
+ *                 type: string
+ *               razorpay_signature:
+ *                 type: string
+ *               userId:
+ *                 type: integer
+ *               topicId:
+ *                 type: integer
  *     responses:
  *       200:
- *         description: Webhook received
+ *         description: Payment verified
  */
-router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
+router.post('/verify-payment', async (req, res) => {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, userId, topicId } = req.body;
+  
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
+    // Verify signature
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(body.toString())
+      .digest("hex");
 
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const user_id = session.metadata.user_id;
-    const topic_id = session.metadata.topic_id;
-    // Update payment_status to 'paid'
-    try {
-      await pool.query('UPDATE user_topics SET payment_status = $1 WHERE user_id = $2 AND topic_id = $3', ['paid', user_id, topic_id]);
-    } catch (err) {
-      return res.status(500).send('Database update failed');
+    const isAuthentic = expectedSignature === razorpay_signature;
+
+    if (isAuthentic) {
+      // Update enrollment to completed
+      await pool.query(
+        'UPDATE user_topics SET payment_status = $1 WHERE user_id = $2 AND topic_id = $3',
+        ['completed', userId, topicId]
+      );
+
+      res.json({ success: true, message: 'Payment verified and enrollment completed' });
+    } else {
+      res.status(400).json({ success: false, error: 'Invalid signature' });
     }
+  } catch (err) {
+    console.error('Error verifying payment:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
-  res.json({ received: true });
 });
+
+/**
+ * @swagger
+ * /enrollments/enroll:
+ *   post:
+ *     summary: Enroll user to topic (for free courses)
+ *     tags: [Enrollments]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               userId:
+ *                 type: integer
+ *               topicId:
+ *                 type: integer
+ *               email:
+ *                 type: string
+ *               currency:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Enrollment success
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ */
+router.post('/enroll', async (req, res) => {
+  const { userId, topicId, email, currency } = req.body;
+  console.log("Enroll request received:", req.body);
+  try {
+    // Get topic details
+    const topic = await pool.query('SELECT id, title, price FROM topics WHERE id = $1', [topicId]);
+    if (!topic.rows.length) return res.status(404).json({ error: 'Topic not found' });
+    const { price } = topic.rows[0];
+
+    // Determine payment status based on price
+    const paymentStatus = (price === 0 || price === null) ? 'completed' : 'pending';
+
+    // Insert enrollment record
+    await pool.query(
+      'INSERT INTO user_topics (user_id, topic_id, payment_status) VALUES ($1, $2, $3) ON CONFLICT (user_id, topic_id) DO UPDATE SET payment_status = $3',
+      [userId, topicId, paymentStatus]
+    );
+
+    if (paymentStatus === 'completed') {
+      res.json({ success: true, message: 'Successfully enrolled in the free course' });
+    } else {
+      res.json({ success: false, message: 'Please complete payment to enroll', requiresPayment: true });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
 
 module.exports = router;
