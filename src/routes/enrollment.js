@@ -299,24 +299,52 @@ router.post('/enroll', async (req, res) => {
     // Get topic details
     const topic = await pool.query('SELECT id, title, price FROM topics WHERE id = $1', [topicId]);
     if (!topic.rows.length) return res.status(404).json({ error: 'Topic not found' });
-    const { price } = topic.rows[0];
+    const { title, price } = topic.rows[0];
 
-    // Determine payment status based on price
-    const paymentStatus = (price === 0 || price === null) ? 'completed' : 'pending';
+    // If free course, enroll directly
+    if (price === 0 || price === null) {
+      await pool.query(
+        'INSERT INTO user_topics (user_id, topic_id, payment_status) VALUES ($1, $2, $3) ON CONFLICT (user_id, topic_id) DO UPDATE SET payment_status = $3',
+        [userId, topicId, 'completed']
+      );
+      return res.json({ success: true, message: 'Successfully enrolled in the free course' });
+    }
 
-    // Insert enrollment record
+    // For paid courses, create Razorpay order
+    const amount = Math.round(Number(price) * 100);
+
+    const options = {
+      amount: amount,
+      currency: currency || 'INR',
+      receipt: `receipt_${topicId}_${userId}_${Date.now()}`,
+      notes: {
+        userId: String(userId),
+        topicId: String(topicId),
+        email: email,
+        courseName: title
+      }
+    };
+
+    const order = await razorpay.orders.create(options);
+
+    // Create pending enrollment record
     await pool.query(
       'INSERT INTO user_topics (user_id, topic_id, payment_status) VALUES ($1, $2, $3) ON CONFLICT (user_id, topic_id) DO UPDATE SET payment_status = $3',
-      [userId, topicId, paymentStatus]
+      [userId, topicId, 'pending']
     );
 
-    if (paymentStatus === 'completed') {
-      res.json({ success: true, message: 'Successfully enrolled in the free course' });
-    } else {
-      res.json({ success: false, message: 'Please complete payment to enroll', requiresPayment: true });
-    }
+    res.json({
+      success: true,
+      requiresPayment: true,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      keyId: process.env.RAZORPAY_KEY_ID,
+      message: 'Razorpay order created successfully'
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in enrollment:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

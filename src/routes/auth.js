@@ -701,16 +701,29 @@ router.post('/resend-otp', async (req, res) => {
       'INSERT INTO otp_verifications (user_id, otp, expires_at) VALUES ($1, $2, $3)',
       [user.id, otp, expiresAt]
     );
-    await transporter.sendMail({
-      from: process.env.GMAIL_USER,
-      to: email,
-      subject: 'Your ThinkCyber Login OTP',
-      html: `<p>Your OTP is: <b>${otp}</b><br>This code is valid for 10 minutes.</p>`
-    });
-    res.status(200).json({ success: true, message: 'OTP resent' });
+    
+    // Try to send email, but don't fail if email service is down
+    try {
+      await transporter.sendMail({
+        from: process.env.GMAIL_USER,
+        to: email,
+        subject: 'Your ThinkCyber Login OTP',
+        html: `<p>Your OTP is: <b>${otp}</b><br>This code is valid for 10 minutes.</p>`
+      });
+      res.status(200).json({ success: true, message: 'OTP resent successfully', otp: process.env.NODE_ENV === 'development' ? otp : undefined });
+    } catch (emailErr) {
+      console.error('Resend OTP email error:', emailErr);
+      // Still return success since OTP was stored, but indicate email failed
+      res.status(200).json({ 
+        success: true, 
+        message: 'OTP generated but email failed to send. Please check console for OTP.',
+        emailFailed: true,
+        otp: process.env.NODE_ENV === 'development' ? otp : undefined // Only show OTP in development
+      });
+    }
   } catch (err) {
-    console.error('Resend OTP email error:', err);
-    res.status(500).json({ success: false, error: 'Email send failed' });
+    console.error('Resend OTP error:', err);
+    res.status(500).json({ success: false, error: 'Failed to generate OTP' });
   }
 });
 
