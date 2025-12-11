@@ -203,7 +203,7 @@ const allowedOrigins = [
 ];
 
 const corsOptions = {
-  origin: ['http://localhost:5173', 'http://localhost:8082', 'http://localhost:3000'], // your frontend URLs
+  origin: ['http://localhost:5173', 'http://localhost:8082', 'http://localhost:3000', 'https://admin.thinkcyber.info', 'https://thinkcyber.info'], // your frontend URLs
   credentials: true
 };
 
