@@ -189,15 +189,34 @@ const authRouter = require('./routes/auth');
 const enrollmentRoutes = require('./routes/enrollment');
 
 // settings
-app.set('port', process.env.PORT || 8080);
-
+app.set('port', process.env.PORT || 8081);
 // middlewares
 app.use(morgan('dev'));
+
+// Allowed origins (local dev + admin + api)
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'https://admin.thinkcyber.info',
+  'https://thinkcyber.info'
+];
+
 const corsOptions = {
-  origin: 'http://localhost:5173', // your frontend URL
-  credentials: true
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+
+    return callback(new Error('CORS Blocked: Origin Not Allowed'), false);
+  },
+  credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 };
+
 app.use(cors(corsOptions));
+app.options('*', (req, res) => res.sendStatus(204));
+
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
