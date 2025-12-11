@@ -190,15 +190,26 @@ const authRouter = require('./routes/auth');
 const enrollmentRoutes = require('./routes/enrollment');
 
 // settings
-app.set('port', process.env.PORT || 8080);
-
+app.set('port', process.env.PORT || 8081);
 // middlewares
 app.use(morgan('dev'));
+
+// Allowed origins (local dev + admin + api)
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'https://admin.thinkcyber.info',
+  'https://thinkcyber.info'
+];
+
 const corsOptions = {
   origin: ['http://localhost:5173', 'http://localhost:8082', 'http://localhost:3000'], // your frontend URLs
   credentials: true
 };
+
 app.use(cors(corsOptions));
+app.options('*', (req, res) => res.sendStatus(204));
+
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
