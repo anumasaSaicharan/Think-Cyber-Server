@@ -98,7 +98,10 @@ router.get('/check/:user_id/:topic_id', async (req, res) => {
   try {
     const result = await pool.query('SELECT payment_status FROM user_topics WHERE user_id = $1 AND topic_id = $2', [user_id, topic_id]);
     if (result.rows.length > 0) {
-      res.json({ enrolled: true, payment_status: result.rows[0].payment_status });
+      const paymentStatus = result.rows[0].payment_status;
+      // Only consider the user enrolled if payment is completed
+      const isEnrolled = paymentStatus === 'completed';
+      res.json({ enrolled: isEnrolled, payment_status: paymentStatus });
     } else {
       res.json({ enrolled: false, payment_status: null });
     }
@@ -301,8 +304,12 @@ router.post('/enroll', async (req, res) => {
     if (!topic.rows.length) return res.status(404).json({ error: 'Topic not found' });
     const { title, price } = topic.rows[0];
 
-    // If free course, enroll directly
-    if (price === 0 || price === null) {
+    console.log(`Topic ${topicId} price:`, price);
+
+    // If free course, enroll directly (treat null, 0, or prices < 1 as free)
+    const numericPrice = Number(price) || 0;
+    if (numericPrice < 1) {
+      console.log(`Enrolling user ${userId} in free topic ${topicId}`);
       await pool.query(
         'INSERT INTO user_topics (user_id, topic_id, payment_status) VALUES ($1, $2, $3) ON CONFLICT (user_id, topic_id) DO UPDATE SET payment_status = $3',
         [userId, topicId, 'completed']
@@ -311,7 +318,9 @@ router.post('/enroll', async (req, res) => {
     }
 
     // For paid courses, create Razorpay order
-    const amount = Math.round(Number(price) * 100);
+    const amount = Math.round(numericPrice * 100);
+
+    console.log(`Creating Razorpay order for topic ${topicId}, amount: ${amount} paise`);
 
     const options = {
       amount: amount,
