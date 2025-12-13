@@ -1,12 +1,32 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const path = require('path');
+const { uploadToS3 } = require('../utils/s3-helper');
+
+// Configure multer for memory storage
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit for images
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/jpg'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only JPEG, PNG, WEBP, and GIF are allowed.'), false);
+    }
+  }
+});
 
 // Helper function to format topic data consistently
 function formatTopicData(topic, modules = []) {
   // Create slugs from names if needed, but keep the original IDs
   const categorySlug = topic.category_slug || (topic.category_name ? generateSlug(topic.category_name) : null);
   const subcategorySlug = topic.subcategory_slug || (topic.subcategory_name ? generateSlug(topic.subcategory_name) : null);
-  
+
   return {
     id: topic.id,
     title: topic.title,
@@ -42,6 +62,7 @@ function formatTopicData(topic, modules = []) {
     viewCount: topic.view_count,
     likeCount: topic.like_count,
     enrollmentCount: topic.enrollment_count,
+    displayOrder: topic.display_order || 0,
     rating: topic.rating, // This might come from joins
     reviewCount: topic.review_count, // This might come from joins
     createdAt: topic.created_at?.toISOString(),
@@ -112,6 +133,9 @@ function formatTopicData(topic, modules = []) {
  *         enrollmentCount:
  *           type: integer
  *           example: 85
+ *         displayOrder:
+ *           type: integer
+ *           example: 0
  *         createdAt:
  *           type: string
  *           format: date-time
@@ -340,12 +364,16 @@ router.get('/topics', async (req, res) => {
         t.*,
         c.name as category_name,
         sc.name as subcategory_name,
+        t.display_order,
         COUNT(*) OVER() as total_count
       FROM topics t
       LEFT JOIN category c ON t.category_id = c.id
       LEFT JOIN subcategory sc ON t.subcategory_id = sc.id
       ${whereClause}
-      ORDER BY t.${sortColumn} ${sortOrder}
+      ORDER BY 
+        CASE WHEN t.display_order = 0 THEN 1 ELSE 0 END,
+        t.display_order ASC,
+        t.${sortColumn} ${sortOrder}
       LIMIT $${paramCount} OFFSET $${paramCount + 1}
     `;
 
@@ -381,6 +409,7 @@ router.get('/topics', async (req, res) => {
       viewCount: row.view_count,
       likeCount: row.like_count,
       enrollmentCount: row.enrollment_count,
+      displayOrder: row.display_order || 0,
       createdAt: row.created_at?.toISOString(),
       updatedAt: row.updated_at?.toISOString()
     }));
@@ -437,7 +466,8 @@ router.post('/topics', async (req, res) => {
       learningObjectives,
       targetAudience = [],
       prerequisites,
-      modules = [] // Add modules support
+      modules = [], // Add modules support
+      displayOrder = 0
     } = req.body;
 
     // Validation
@@ -451,7 +481,7 @@ router.post('/topics', async (req, res) => {
     // Handle alternative field names
     const finalIsFeatured = featured !== undefined ? featured : isFeatured;
     const finalThumbnailUrl = thumbnail || thumbnailUrl;
-    
+
     // Convert duration string to minutes if needed
     let finalDurationMinutes = durationMinutes;
     if (duration && typeof duration === 'string') {
@@ -469,17 +499,17 @@ router.post('/topics', async (req, res) => {
       // Try to find by name first, or convert slug to name-like format
       const categoryName = category.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
       let categoryResult = await req.pool.query('SELECT id FROM category WHERE LOWER(name) = LOWER($1)', [categoryName]);
-      
+
       // If not found by converted name, try original slug as name
       if (categoryResult.rows.length === 0) {
         categoryResult = await req.pool.query('SELECT id FROM category WHERE LOWER(name) = LOWER($1)', [category]);
       }
-      
+
       // If still not found, try partial match
       if (categoryResult.rows.length === 0) {
         categoryResult = await req.pool.query('SELECT id FROM category WHERE LOWER(name) LIKE LOWER($1)', [`%${category.replace(/-/g, '%')}%`]);
       }
-      
+
       if (categoryResult.rows.length > 0) {
         finalCategoryId = categoryResult.rows[0].id;
       }
@@ -489,17 +519,17 @@ router.post('/topics', async (req, res) => {
       // Try to find by name first, or convert slug to name-like format
       const subcategoryName = subcategory.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
       let subcategoryResult = await req.pool.query('SELECT id FROM subcategory WHERE LOWER(name) = LOWER($1)', [subcategoryName]);
-      
+
       // If not found by converted name, try original slug as name
       if (subcategoryResult.rows.length === 0) {
         subcategoryResult = await req.pool.query('SELECT id FROM subcategory WHERE LOWER(name) = LOWER($1)', [subcategory]);
       }
-      
+
       // If still not found, try partial match
       if (subcategoryResult.rows.length === 0) {
         subcategoryResult = await req.pool.query('SELECT id FROM subcategory WHERE LOWER(name) LIKE LOWER($1)', [`%${subcategory.replace(/-/g, '%')}%`]);
       }
-      
+
       if (subcategoryResult.rows.length > 0) {
         finalSubcategoryId = subcategoryResult.rows[0].id;
       }
@@ -531,9 +561,9 @@ router.post('/topics', async (req, res) => {
           title, description, content, slug, category_id, subcategory_id,
           difficulty, status, is_featured, is_free, price, duration_minutes,
           thumbnail_url, tags, meta_title, meta_description, meta_keywords, author_id,
-          emoji, learning_objectives, target_audience, prerequisites
+          emoji, learning_objectives, target_audience, prerequisites, display_order
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
         ) RETURNING *
       `, [
         title.trim(),
@@ -557,7 +587,8 @@ router.post('/topics', async (req, res) => {
         emoji || null,
         learningObjectives || null,
         JSON.stringify(targetAudience || []),
-        prerequisites || null
+        prerequisites || null,
+        parseInt(displayOrder || 0)
       ]);
 
       const topic = topicResult.rows[0];
@@ -565,11 +596,11 @@ router.post('/topics', async (req, res) => {
 
       // Create modules and videos if provided
       const createdModules = [];
-      
+
       if (modules && Array.isArray(modules) && modules.length > 0) {
         for (let i = 0; i < modules.length; i++) {
           const module = modules[i];
-          
+
           if (!module.title || module.title.trim() === '') {
             continue; // Skip modules without title
           }
@@ -606,7 +637,7 @@ router.post('/topics', async (req, res) => {
           if (module.videos && Array.isArray(module.videos) && module.videos.length > 0) {
             for (let j = 0; j < module.videos.length; j++) {
               const video = module.videos[j];
-              
+
               if (!video.title || video.title.trim() === '') {
                 continue; // Skip videos without title
               }
@@ -614,7 +645,7 @@ router.post('/topics', async (req, res) => {
               // Handle alternative field names for videos
               const videoThumbnailUrl = video.thumbnail || video.thumbnailUrl;
               let videoDurationSeconds = parseInt(video.durationSeconds || 0);
-              
+
               // Convert duration from minutes to seconds if needed
               if (video.duration && typeof video.duration === 'string') {
                 const durationFloat = parseFloat(video.duration);
@@ -663,7 +694,8 @@ router.post('/topics', async (req, res) => {
                 thumbnailUrl: createdVideo.thumbnail_url,
                 thumbnail: createdVideo.thumbnail_url, // Alternative field name
                 durationSeconds: createdVideo.duration_seconds,
-                duration: createdVideo.duration_seconds ? (createdVideo.duration_seconds / 60).toFixed(0) : "0", // Convert to minutes
+                duration: createdVideo.duration_seconds ?
+                  `${Math.floor(createdVideo.duration_seconds / 60)}:${(createdVideo.duration_seconds % 60).toString().padStart(2, '0')}` : "0:00",
                 orderIndex: createdVideo.order_index,
                 order: createdVideo.order_index, // Alternative field name
                 isActive: createdVideo.is_active,
@@ -717,6 +749,7 @@ router.post('/topics', async (req, res) => {
           enrollmentCount: topic.enrollment_count,
           createdAt: topic.created_at?.toISOString(),
           updatedAt: topic.updated_at?.toISOString(),
+          displayOrder: topic.display_order || 0,
           modules: createdModules
         }
       });
@@ -845,7 +878,8 @@ router.get('/topics/:id', async (req, res) => {
           thumbnailUrl: video.thumbnail_url,
           thumbnail: video.thumbnail_url, // Alternative field name
           durationSeconds: video.duration_seconds,
-          duration: video.duration_seconds ? (video.duration_seconds / 60).toFixed(0) : "0", // Convert to minutes
+          duration: video.duration_seconds ?
+            `${Math.floor(video.duration_seconds / 60)}:${(video.duration_seconds % 60).toString().padStart(2, '0')}` : "0:00",
           orderIndex: video.order_index,
           order: video.order_index, // Alternative field name
           isActive: video.is_active,
@@ -878,7 +912,7 @@ router.get('/topics/:id', async (req, res) => {
 });
 
 // PUT /api/topics/:id - Update topic
-router.put('/topics/:id', async (req, res) => {
+router.put('/topics/:id', upload.single('thumbnail'), async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = req.body;
@@ -906,7 +940,7 @@ router.put('/topics/:id', async (req, res) => {
       // Check for unique slug (excluding current topic)
       while (true) {
         const slugCheck = await req.pool.query(
-          'SELECT id FROM topics WHERE slug = $1 AND id != $2', 
+          'SELECT id FROM topics WHERE slug = $1 AND id != $2',
           [slug, id]
         );
         if (slugCheck.rows.length === 0) break;
@@ -920,12 +954,12 @@ router.put('/topics/:id', async (req, res) => {
       'title', 'description', 'content', 'slug', 'category_id', 'subcategory_id',
       'difficulty', 'status', 'is_featured', 'is_free', 'price', 'duration_minutes',
       'thumbnail_url', 'tags', 'meta_title', 'meta_description', 'meta_keywords', 'author_id',
-      'emoji', 'learning_objectives', 'target_audience', 'prerequisites'
+      'emoji', 'learning_objectives', 'target_audience', 'prerequisites', 'display_order'
     ];
 
     for (const [key, value] of Object.entries(updateData)) {
       let dbField = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-      
+
       // Handle alternative field names
       if (key === 'featured') dbField = 'is_featured';
       if (key === 'thumbnail') dbField = 'thumbnail_url';
@@ -940,11 +974,11 @@ router.put('/topics/:id', async (req, res) => {
             // It's a category name/slug, try to find by name
             const categoryName = value.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
             let categoryResult = await req.pool.query('SELECT id FROM category WHERE LOWER(name) = LOWER($1)', [categoryName]);
-            
+
             if (categoryResult.rows.length === 0) {
               categoryResult = await req.pool.query('SELECT id FROM category WHERE LOWER(name) = LOWER($1)', [value]);
             }
-            
+
             if (categoryResult.rows.length > 0) {
               updateData[key] = categoryResult.rows[0].id;
             } else {
@@ -964,11 +998,11 @@ router.put('/topics/:id', async (req, res) => {
             // It's a subcategory name/slug, try to find by name
             const subcategoryName = value.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
             let subcategoryResult = await req.pool.query('SELECT id FROM subcategory WHERE LOWER(name) = LOWER($1)', [subcategoryName]);
-            
+
             if (subcategoryResult.rows.length === 0) {
               subcategoryResult = await req.pool.query('SELECT id FROM subcategory WHERE LOWER(name) = LOWER($1)', [value]);
             }
-            
+
             if (subcategoryResult.rows.length > 0) {
               updateData[key] = subcategoryResult.rows[0].id;
             } else {
@@ -985,7 +1019,11 @@ router.put('/topics/:id', async (req, res) => {
           updateData[key] = Math.round(durationFloat * 60);
         }
       }
-      
+      if (key === 'displayOrder') {
+        dbField = 'display_order';
+        updateData[key] = parseInt(value || 0);
+      }
+
       if (allowedFields.includes(dbField)) {
         updateFields.push(`${dbField} = $${paramCount}`);
         if (key === 'tags' || key === 'targetAudience') {
@@ -994,6 +1032,24 @@ router.put('/topics/:id', async (req, res) => {
           updateValues.push(updateData[key]);
         }
         paramCount++;
+      }
+    }
+
+    // Handle file upload if present
+    if (req.file) {
+      try {
+        const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'topic-thumbnails');
+
+        // Add thumbnail_url to update fields
+        updateFields.push(`thumbnail_url = $${paramCount}`);
+        updateValues.push(s3Result.url);
+        paramCount++;
+      } catch (uploadError) {
+        console.error('Failed to upload thumbnail to S3:', uploadError);
+        return res.status(500).json({
+          success: false,
+          error: 'Failed to upload thumbnail image'
+        });
       }
     }
 
@@ -1056,7 +1112,7 @@ router.put('/topics/:id', async (req, res) => {
                 if (videoData.id && typeof videoData.id === 'string' && videoData.id.startsWith('new-')) {
                   // This is a new video for the new module
                   const durationSeconds = videoData.duration ? parseInt(videoData.duration) * 60 : 0;
-                  
+
                   // Insert the video into topic_videos
                   const insertResult = await client.query(`
                     INSERT INTO topic_videos (topic_id, module_id, title, description, video_url, duration_seconds, order_index, video_type, is_preview)
@@ -1081,7 +1137,7 @@ router.put('/topics/:id', async (req, res) => {
                     // Extract filename from URL (e.g., /api/uploads/videos/filename.mp4 -> filename.mp4)
                     const urlParts = videoData.videoUrl.split('/');
                     const filename = urlParts[urlParts.length - 1];
-                    
+
                     // Update uploads table to link this file to the topic structure
                     await client.query(`
                       UPDATE uploads 
@@ -1131,7 +1187,7 @@ router.put('/topics/:id', async (req, res) => {
                 if (videoData.id && typeof videoData.id === 'string' && videoData.id.startsWith('new-')) {
                   // This is a new video for existing module
                   const durationSeconds = videoData.duration ? parseInt(videoData.duration) * 60 : 0;
-                  
+
                   // Insert the video into topic_videos
                   const insertResult = await client.query(`
                     INSERT INTO topic_videos (topic_id, module_id, title, description, video_url, duration_seconds, order_index, video_type, is_preview)
@@ -1156,7 +1212,7 @@ router.put('/topics/:id', async (req, res) => {
                     // Extract filename from URL (e.g., /api/uploads/videos/filename.mp4 -> filename.mp4)
                     const urlParts = videoData.videoUrl.split('/');
                     const filename = urlParts[urlParts.length - 1];
-                    
+
                     // Update uploads table to link this file to the topic structure
                     await client.query(`
                       UPDATE uploads 
@@ -1193,7 +1249,7 @@ router.put('/topics/:id', async (req, res) => {
                     // Extract filename from URL (e.g., /api/uploads/videos/filename.mp4 -> filename.mp4)
                     const urlParts = videoData.videoUrl.split('/');
                     const filename = urlParts[urlParts.length - 1];
-                    
+
                     // Update uploads table to link this file to the topic structure
                     await client.query(`
                       UPDATE uploads 

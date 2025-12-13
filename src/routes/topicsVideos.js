@@ -3,7 +3,15 @@ const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
 const { uploadToS3, deleteFromS3 } = require('../utils/s3-helper');
+const ffmpeg = require('fluent-ffmpeg');
+const { Readable } = require('stream');
+const ffprobe = require('ffprobe-static');
+const fs = require('fs');
+const os = require('os');
 const router = express.Router();
+
+// Set ffprobe path
+ffmpeg.setFfprobePath(ffprobe.path);
 
 // Configure multer for memory storage (S3 upload)
 const storage = multer.memoryStorage();
@@ -30,6 +38,48 @@ const validateFileSize = (file) => {
   const maxSize = 1000 * 1024 * 1024; // 1GB
   if (file.size > maxSize) {
     throw new Error(`File too large. Maximum size: 1GB`);
+  }
+};
+
+// Helper function to get video duration from buffer
+const getVideoDurationFromBuffer = async (buffer) => {
+  const tempFilePath = path.join(os.tmpdir(), `temp-video-${crypto.randomUUID()}.mp4`);
+
+  try {
+    console.log('Writing buffer to temp file:', tempFilePath, 'Size:', buffer.length);
+    fs.writeFileSync(tempFilePath, buffer);
+
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(tempFilePath, (err, metadata) => {
+        // Always cleanup temp file
+        try {
+          if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+        } catch (e) {
+          console.error('Error deleting temp file:', e);
+        }
+
+        if (err) {
+          console.error('ffprobe error:', err);
+          resolve(0); // Resolve with 0 on error
+          return;
+        }
+
+        // Log metadata for debugging
+        // console.log('ffprobe metadata:', JSON.stringify(metadata.format, null, 2));
+
+        const duration = metadata.format.duration;
+        console.log('Found duration:', duration);
+        resolve(duration ? parseFloat(duration) : 0);
+      });
+    });
+
+  } catch (error) {
+    console.error('Error in getVideoDurationFromBuffer:', error);
+    // Cleanup if error occurs before ffprobe callback
+    if (fs.existsSync(tempFilePath)) {
+      try { fs.unlinkSync(tempFilePath); } catch (e) { }
+    }
+    return 0;
   }
 };
 
@@ -581,7 +631,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
         'SELECT id FROM topics WHERE id = $1',
         [topicId]
       );
-      
+
       if (topicCheck.rows.length === 0) {
         return res.status(404).json({
           success: false,
@@ -593,7 +643,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
         'SELECT id FROM topic_modules WHERE id = $1 AND topic_id = $2',
         [moduleId, topicId]
       );
-      
+
       if (moduleCheck.rows.length === 0) {
         return res.status(404).json({
           success: false,
@@ -626,8 +676,20 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
     // Save to topic_videos table
     if (req.pool) {
       try {
-        const durationSeconds = duration ? parseFloat(duration) * 60 : 0;
-        
+        // Calculate duration if not provided or just to be safe/accurate
+        let durationSeconds = 0;
+        try {
+          const calculatedDuration = await getVideoDurationFromBuffer(req.file.buffer);
+          if (calculatedDuration > 0) {
+            durationSeconds = calculatedDuration;
+          } else if (duration) {
+            durationSeconds = parseFloat(duration) * 60;
+          }
+        } catch (durErr) {
+          console.warn('Failed to calculate duration, falling back to provided duration:', durErr);
+          if (duration) durationSeconds = parseFloat(duration) * 60;
+        }
+
         const videoResult = await req.pool.query(`
           INSERT INTO topic_videos (
             topic_id,
@@ -655,7 +717,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
           new Date(),
           new Date()
         ]);
-        
+
         const video = videoResult.rows[0];
         videoId = video.id;
 
@@ -696,11 +758,11 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
           fileData.mimeType,
           'video',
           'topic-videos',
-          JSON.stringify({ 
-            title: fileData.title, 
-            description: fileData.description, 
-            duration: fileData.duration, 
-            topicId: parseInt(topicId), 
+          JSON.stringify({
+            title: fileData.title,
+            description: fileData.description,
+            duration: fileData.duration,
+            topicId: parseInt(topicId),
             moduleId: parseInt(moduleId),
             videoId: videoId,
             order: fileData.order,
@@ -768,7 +830,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
 router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.array('videos', 10), async (req, res) => {
   try {
     const { topicId, moduleId } = req.params;
-    
+
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({
         success: false,
@@ -782,7 +844,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
         'SELECT id FROM topics WHERE id = $1',
         [topicId]
       );
-      
+
       if (topicCheck.rows.length === 0) {
         return res.status(404).json({
           success: false,
@@ -794,7 +856,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
         'SELECT id FROM topic_modules WHERE id = $1 AND topic_id = $2',
         [moduleId, topicId]
       );
-      
+
       if (moduleCheck.rows.length === 0) {
         return res.status(404).json({
           success: false,
@@ -835,8 +897,20 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
 
         // Save to topic_videos table
         if (req.pool) {
-          const durationSeconds = fileData.duration ? parseFloat(fileData.duration) * 60 : 0;
-          
+          let durationSeconds = 0;
+          try {
+            // Calculate duration from buffer
+            const calculatedDuration = await getVideoDurationFromBuffer(file.buffer);
+            if (calculatedDuration > 0) {
+              durationSeconds = calculatedDuration;
+            } else if (fileData.duration) {
+              durationSeconds = parseFloat(fileData.duration) * 60;
+            }
+          } catch (durErr) {
+            console.warn('Failed to calculate duration for file ' + file.originalname, durErr);
+            if (fileData.duration) durationSeconds = parseFloat(fileData.duration) * 60;
+          }
+
           const videoResult = await req.pool.query(`
             INSERT INTO topic_videos (
               topic_id,
@@ -864,7 +938,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
             new Date(),
             new Date()
           ]);
-          
+
           const video = videoResult.rows[0];
           videoId = video.id;
 
@@ -881,11 +955,11 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
             fileData.mimeType,
             'video',
             'topic-videos',
-            JSON.stringify({ 
-              title: fileData.title, 
-              description: fileData.description, 
-              duration: fileData.duration, 
-              topicId: parseInt(topicId), 
+            JSON.stringify({
+              title: fileData.title,
+              description: fileData.description,
+              duration: fileData.duration,
+              topicId: parseInt(topicId),
               moduleId: parseInt(moduleId),
               videoId: videoId,
               order: fileData.order,
@@ -994,7 +1068,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/reorder', async (req, res
 
     // Update order for each video
     const client = await req.pool.connect();
-    
+
     try {
       await client.query('BEGIN');
 
@@ -1033,7 +1107,7 @@ router.post('/topics/:topicId/modules/:moduleId/videos/reorder', async (req, res
 // Error handling middleware for multer errors
 router.use((error, req, res, next) => {
   console.error('Topics videos route error:', error);
-  
+
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({

@@ -232,10 +232,13 @@ router.post('/video', upload.single('video'), async (req, res) => {
 
     const { title, description, duration, topicId, moduleId } = req.body;
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'videos');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename, 'video'),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -265,7 +268,7 @@ router.post('/video', upload.single('video'), async (req, res) => {
           'mp4',
           new Date()
         ]);
-        
+
         fileData.videoId = videoResult.rows[0].id;
       } catch (dbError) {
         console.warn('Failed to save video to database:', dbError);
@@ -282,7 +285,7 @@ router.post('/video', upload.single('video'), async (req, res) => {
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          req.file.path,
+          s3Result.url, // Use S3 URL
           fileData.size,
           fileData.mimeType,
           'video',
@@ -351,10 +354,13 @@ router.post('/document', upload.single('document'), async (req, res) => {
 
     const { title, description, category } = req.body;
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'documents');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename, 'document'),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -374,7 +380,7 @@ router.post('/document', upload.single('document'), async (req, res) => {
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          req.file.path,
+          s3Result.url,
           fileData.size,
           fileData.mimeType,
           'document',
@@ -440,10 +446,13 @@ router.post('/thumbnail', upload.single('thumbnail'), async (req, res) => {
 
     const { videoId, topicId } = req.body;
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'thumbnails');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename, 'thumbnail'),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -461,7 +470,7 @@ router.post('/thumbnail', upload.single('thumbnail'), async (req, res) => {
             [fileData.url, videoId]
           );
         }
-        
+
         if (topicId) {
           await req.pool.query(
             'UPDATE topics SET thumbnail_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
@@ -477,7 +486,7 @@ router.post('/thumbnail', upload.single('thumbnail'), async (req, res) => {
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          req.file.path,
+          s3Result.url,
           fileData.size,
           fileData.mimeType,
           'thumbnail',
@@ -577,7 +586,7 @@ router.post('/topics/:topicId/modules/:moduleId/video', upload.single('video'), 
         'SELECT id FROM topics WHERE id = $1',
         [topicId]
       );
-      
+
       if (topicCheck.rows.length === 0) {
         return res.status(404).json({
           success: false,
@@ -589,7 +598,7 @@ router.post('/topics/:topicId/modules/:moduleId/video', upload.single('video'), 
         'SELECT id FROM topic_modules WHERE id = $1 AND topic_id = $2',
         [moduleId, topicId]
       );
-      
+
       if (moduleCheck.rows.length === 0) {
         return res.status(404).json({
           success: false,
@@ -598,10 +607,13 @@ router.post('/topics/:topicId/modules/:moduleId/video', upload.single('video'), 
       }
     }
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'videos');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename, 'video'),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -620,7 +632,7 @@ router.post('/topics/:topicId/modules/:moduleId/video', upload.single('video'), 
     if (req.pool) {
       try {
         const durationSeconds = duration ? parseFloat(duration) * 60 : 0;
-        
+
         const videoResult = await req.pool.query(`
           INSERT INTO topic_videos (topic_id, module_id, title, description, video_url, duration_seconds, video_type, order_index, created_at, updated_at)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -637,7 +649,7 @@ router.post('/topics/:topicId/modules/:moduleId/video', upload.single('video'), 
           new Date(),
           new Date()
         ]);
-        
+
         videoId = videoResult.rows[0].id;
         fileData.videoId = videoId;
 
@@ -684,15 +696,15 @@ router.post('/topics/:topicId/modules/:moduleId/video', upload.single('video'), 
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          req.file.path,
+          s3Result.url,
           fileData.size,
           fileData.mimeType,
           'video',
-          JSON.stringify({ 
-            title: fileData.title, 
-            description: fileData.description, 
-            duration: fileData.duration, 
-            topicId, 
+          JSON.stringify({
+            title: fileData.title,
+            description: fileData.description,
+            duration: fileData.duration,
+            topicId,
             moduleId,
             videoId,
             order: fileData.order
@@ -765,7 +777,7 @@ router.post('/topics/:topicId/thumbnail', upload.single('thumbnail'), async (req
         'SELECT id FROM topics WHERE id = $1',
         [topicId]
       );
-      
+
       if (topicCheck.rows.length === 0) {
         return res.status(404).json({
           success: false,
@@ -774,10 +786,13 @@ router.post('/topics/:topicId/thumbnail', upload.single('thumbnail'), async (req
       }
     }
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'thumbnails');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename, 'thumbnail'),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -801,7 +816,7 @@ router.post('/topics/:topicId/thumbnail', upload.single('thumbnail'), async (req
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          req.file.path,
+          s3Result.url,
           fileData.size,
           fileData.mimeType,
           'thumbnail',
@@ -874,7 +889,7 @@ router.post('/videos/:videoId/thumbnail', upload.single('thumbnail'), async (req
         'SELECT id FROM topic_videos WHERE id = $1',
         [videoId]
       );
-      
+
       if (videoCheck.rows.length === 0) {
         return res.status(404).json({
           success: false,
@@ -883,10 +898,13 @@ router.post('/videos/:videoId/thumbnail', upload.single('thumbnail'), async (req
       }
     }
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'thumbnails');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename, 'thumbnail'),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -910,7 +928,7 @@ router.post('/videos/:videoId/thumbnail', upload.single('thumbnail'), async (req
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          req.file.path,
+          s3Result.url, // Use S3 URL
           fileData.size,
           fileData.mimeType,
           'thumbnail',
@@ -981,10 +999,13 @@ router.post('/bulk', upload.array('files', 10), async (req, res) => {
       try {
         validateFileSize(file, uploadType);
 
+        // Upload to S3
+        const s3Result = await uploadToS3(file.buffer, file.originalname, file.mimetype, 'bulk');
+
         const fileData = {
           id: crypto.randomUUID(),
-          url: getFileUrl(req, file.filename, uploadType),
-          filename: file.filename,
+          url: s3Result.url,
+          filename: s3Result.key,
           originalName: file.originalname,
           size: file.size,
           mimeType: file.mimetype,
@@ -1001,7 +1022,7 @@ router.post('/bulk', upload.array('files', 10), async (req, res) => {
               fileData.id,
               fileData.filename,
               fileData.originalName,
-              file.path,
+              s3Result.url,
               fileData.size,
               fileData.mimeType,
               uploadType,
@@ -1099,21 +1120,24 @@ router.put('/videos/:videoId/replace', upload.single('video'), async (req, res) 
         'SELECT * FROM topic_videos WHERE id = $1',
         [videoId]
       );
-      
+
       if (videoResult.rows.length === 0) {
         return res.status(404).json({
           success: false,
           error: 'Video not found'
         });
       }
-      
+
       existingVideo = videoResult.rows[0];
     }
 
+    // Upload to S3
+    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'videos');
+
     const fileData = {
       id: crypto.randomUUID(),
-      url: getFileUrl(req, req.file.filename, 'video'),
-      filename: req.file.filename,
+      url: s3Result.url,
+      filename: s3Result.key,
       originalName: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
@@ -1128,7 +1152,7 @@ router.put('/videos/:videoId/replace', upload.single('video'), async (req, res) 
     if (req.pool) {
       try {
         const durationSeconds = duration ? parseFloat(duration) * 60 : existingVideo?.duration_seconds || 0;
-        
+
         await req.pool.query(`
           UPDATE topic_videos 
           SET 
@@ -1164,7 +1188,7 @@ router.put('/videos/:videoId/replace', upload.single('video'), async (req, res) 
             'SELECT topic_id FROM topic_modules WHERE id = $1',
             [existingVideo.module_id]
           );
-          
+
           if (moduleResult.rows.length > 0) {
             await req.pool.query(`
               UPDATE topics 
@@ -1187,15 +1211,15 @@ router.put('/videos/:videoId/replace', upload.single('video'), async (req, res) 
           fileData.id,
           fileData.filename,
           fileData.originalName,
-          req.file.path,
+          fileData.url, // Use S3 URL
           fileData.size,
           fileData.mimeType,
           'video',
-          JSON.stringify({ 
+          JSON.stringify({
             videoId,
             action: 'replace',
-            title: fileData.title, 
-            description: fileData.description, 
+            title: fileData.title,
+            description: fileData.description,
             duration: fileData.duration,
             moduleId: existingVideo?.module_id
           }),
@@ -1289,7 +1313,7 @@ router.get('/files', async (req, res) => {
       id: file.id,
       filename: file.filename,
       originalName: file.original_name,
-      url: getFileUrl(req, file.filename, file.upload_type),
+      url: file.file_path, // Use stored URL from DB
       size: file.file_size,
       mimeType: file.mime_type,
       type: file.upload_type,
@@ -1365,11 +1389,17 @@ router.delete('/files/:id', async (req, res) => {
 
     const file = fileResult.rows[0];
 
-    // Delete physical file
+    // Delete physical file or S3 object
     try {
-      await fs.unlink(file.file_path);
+      if (file.file_path && file.file_path.startsWith('http')) {
+        // Assume S3
+        await deleteFromS3(file.filename);
+      } else {
+        // Local file
+        await fs.unlink(file.file_path);
+      }
     } catch (fsError) {
-      console.warn('Failed to delete physical file:', fsError);
+      console.warn('Failed to delete file:', fsError);
     }
 
     // Delete from database
@@ -1392,7 +1422,7 @@ router.delete('/files/:id', async (req, res) => {
 // Error handling middleware
 router.use((error, req, res, next) => {
   console.error('Upload route error:', error);
-  
+
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({

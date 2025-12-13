@@ -198,9 +198,9 @@ router.get('/subcategories', async (req, res) => {
   try {
     // Check if database pool is available
     if (!req.pool) {
-      return res.status(500).json({ 
+      return res.status(500).json({
         success: false,
-        error: 'Database connection not available' 
+        error: 'Database connection not available'
       });
     }
 
@@ -216,7 +216,7 @@ router.get('/subcategories', async (req, res) => {
     // Validate sortBy field to prevent SQL injection
     const allowedSortFields = ['id', 'name', 'category_id', 'createdAt', 'created_at'];
     let sortField = allowedSortFields.includes(sortBy) ? sortBy : 'id';
-    
+
     // Map camelCase to snake_case for database columns
     if (sortField === 'createdAt') {
       sortField = 'created_at';
@@ -256,17 +256,22 @@ router.get('/subcategories', async (req, res) => {
       FROM subcategory s 
       LEFT JOIN category c ON s.category_id = c.id
       ${whereClause}
-      ORDER BY s.${sortField} ${sortOrder} 
+       ORDER BY
+      CASE 
+        WHEN s.display_order = 0 THEN 1 
+        ELSE 0 
+      END,
+      s.display_order ASC, s.${sortField} ${sortOrder} 
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
-    
+
     // Add pagination parameters
     queryParams.push(limit, offset);
 
     // Get total count for pagination info with same filters
     const countQuery = `SELECT COUNT(*) as total FROM subcategory s ${whereClause}`;
     const countParams = queryParams.slice(0, -2); // Remove limit and offset for count query
-    
+
     // Get stats queries
     const statsQuery = `
       SELECT 
@@ -278,14 +283,14 @@ router.get('/subcategories', async (req, res) => {
         COUNT(DISTINCT category_id) as categories_used
       FROM subcategory
     `;
-    
+
     // Get categories list (all categories, not just those with subcategories)
     const categoriesQuery = `
       SELECT c.id, c.name 
       FROM category c 
       ORDER BY c.name
     `;
-    
+
     // Execute all queries
     const [result, countResult, statsResult, categoriesResult] = await Promise.all([
       req.pool.query(query, queryParams),
@@ -344,7 +349,7 @@ router.get('/subcategories', async (req, res) => {
     });
   } catch (err) {
     console.error('Error in GET /subcategories:', err);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: err.message || 'Internal server error'
     });
@@ -353,21 +358,27 @@ router.get('/subcategories', async (req, res) => {
 
 // POST subcategory
 router.post('/subcategories', async (req, res) => {
-  const { name, category_id, categoryId, description, status } = req.body;
-  
+  const { name, category_id, categoryId, description, status, displayOrder } = req.body;
+
   if (!name || name.trim() === '') {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Subcategory name is required' 
+      error: 'Subcategory name is required'
     });
   }
+
+  const finalDisplayOrder =
+  displayOrder !== undefined && displayOrder !== null
+    ? parseInt(displayOrder, 10)
+    : 0;
+
 
   // Accept both category_id and categoryId formats
   const finalCategoryId = category_id || categoryId;
   if (!finalCategoryId) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Category ID is required' 
+      error: 'Category ID is required'
     });
   }
 
@@ -379,20 +390,20 @@ router.post('/subcategories', async (req, res) => {
   try {
     // Check if category exists
     const categoryCheck = await req.pool.query(
-      'SELECT id, name FROM category WHERE id = $1', 
+      'SELECT id, name FROM category WHERE id = $1',
       [finalCategoryId]
     );
-    
+
     if (!categoryCheck || !categoryCheck.rows || categoryCheck.rows.length === 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Category not found' 
+        error: 'Category not found'
       });
     }
 
     const result = await req.pool.query(
-      'INSERT INTO subcategory (name, category_id, description, status, topics_count) VALUES ($1, $2, $3, $4, $5) RETURNING *', 
-      [name.trim(), finalCategoryId, subcategoryDescription, subcategoryStatus, 0]
+      'INSERT INTO subcategory (name, category_id, description, status, topics_count, display_order) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [name.trim(), finalCategoryId, subcategoryDescription, subcategoryStatus, 0, finalDisplayOrder]
     );
 
     if (!result || !result.rows || result.rows.length === 0) {
@@ -411,7 +422,7 @@ router.post('/subcategories', async (req, res) => {
       createdAt: result.rows[0].created_at ? result.rows[0].created_at.toISOString().split('T')[0] : null,
       updatedAt: result.rows[0].updated_at ? result.rows[0].updated_at.toISOString().split('T')[0] : null
     };
-    
+
     res.status(201).json({
       success: true,
       data: formattedData,
@@ -419,7 +430,7 @@ router.post('/subcategories', async (req, res) => {
     });
   } catch (err) {
     console.error('Error in POST /subcategories:', err);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: err.message || 'Internal server error'
     });
@@ -429,11 +440,11 @@ router.post('/subcategories', async (req, res) => {
 // GET single subcategory by ID
 router.get('/subcategories/:id', async (req, res) => {
   const subcategoryId = parseInt(req.params.id);
-  
+
   if (!subcategoryId || isNaN(subcategoryId)) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Valid subcategory ID is required' 
+      error: 'Valid subcategory ID is required'
     });
   }
 
@@ -451,14 +462,14 @@ router.get('/subcategories/:id', async (req, res) => {
         c.name as category_name 
        FROM subcategory s 
        LEFT JOIN category c ON s.category_id = c.id
-       WHERE s.id = $1`, 
+       WHERE s.id = $1`,
       [subcategoryId]
     );
-    
+
     if (!result || !result.rows || result.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Subcategory not found' 
+        error: 'Subcategory not found'
       });
     }
 
@@ -471,6 +482,7 @@ router.get('/subcategories/:id', async (req, res) => {
       categoryName: row.category_name,
       topicsCount: row.topics_count || 0,
       status: row.status || 'Active',
+      displayOrder: row.display_order,
       createdAt: row.created_at ? row.created_at.toISOString().split('T')[0] : null,
       updatedAt: row.updated_at ? row.updated_at.toISOString().split('T')[0] : null
     };
@@ -481,7 +493,7 @@ router.get('/subcategories/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('Error in GET /subcategories/:id:', err);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: err.message || 'Internal server error'
     });
@@ -491,28 +503,28 @@ router.get('/subcategories/:id', async (req, res) => {
 // PUT update subcategory by ID
 router.put('/subcategories/:id', async (req, res) => {
   const subcategoryId = parseInt(req.params.id);
-  const { name, category_id, categoryId, description, status } = req.body;
-  
+  const { name, category_id, categoryId, description, status, displayOrder } = req.body;
+
   if (!subcategoryId || isNaN(subcategoryId)) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Valid subcategory ID is required' 
+      error: 'Valid subcategory ID is required'
     });
   }
 
   if (!name || name.trim() === '') {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Subcategory name is required' 
+      error: 'Subcategory name is required'
     });
   }
 
   // Accept both category_id and categoryId formats
   const finalCategoryId = category_id || categoryId;
   if (!finalCategoryId) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Category ID is required' 
+      error: 'Category ID is required'
     });
   }
 
@@ -524,34 +536,36 @@ router.put('/subcategories/:id', async (req, res) => {
   try {
     // Check if subcategory exists
     const existingSubcategory = await req.pool.query(
-      'SELECT id FROM subcategory WHERE id = $1', 
+      'SELECT id FROM subcategory WHERE id = $1',
       [subcategoryId]
     );
-    
+
     if (!existingSubcategory || !existingSubcategory.rows || existingSubcategory.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Subcategory not found' 
+        error: 'Subcategory not found'
       });
     }
 
     // Check if category exists
     const categoryCheck = await req.pool.query(
-      'SELECT id, name FROM category WHERE id = $1', 
+      'SELECT id, name FROM category WHERE id = $1',
       [finalCategoryId]
     );
-    
+
     if (!categoryCheck || !categoryCheck.rows || categoryCheck.rows.length === 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         success: false,
-        error: 'Category not found' 
+        error: 'Category not found'
       });
     }
 
+    const order = displayOrder !== undefined && displayOrder !== null ? parseInt(displayOrder) : 0;
+
     // Update the subcategory
     const result = await req.pool.query(
-      'UPDATE subcategory SET name = $1, category_id = $2, description = $3, status = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 RETURNING *', 
-      [name.trim(), finalCategoryId, subcategoryDescription, subcategoryStatus, subcategoryId]
+      'UPDATE subcategory SET name = $1, category_id = $2, description = $3, status = $4, display_order = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
+      [name.trim(), finalCategoryId, subcategoryDescription, subcategoryStatus, order, subcategoryId]
     );
 
     if (!result || !result.rows || result.rows.length === 0) {
@@ -567,6 +581,7 @@ router.put('/subcategories/:id', async (req, res) => {
       categoryName: categoryCheck.rows[0].name,
       topicsCount: result.rows[0].topics_count || 0,
       status: result.rows[0].status,
+      displayOrder: result.rows[0].display_order,
       createdAt: result.rows[0].created_at ? result.rows[0].created_at.toISOString().split('T')[0] : null,
       updatedAt: result.rows[0].updated_at ? result.rows[0].updated_at.toISOString().split('T')[0] : null
     };
@@ -578,7 +593,7 @@ router.put('/subcategories/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('Error in PUT /subcategories/:id:', err);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: err.message || 'Internal server error'
     });
@@ -588,31 +603,31 @@ router.put('/subcategories/:id', async (req, res) => {
 // DELETE subcategory by ID
 router.delete('/subcategories/:id', async (req, res) => {
   const subcategoryId = parseInt(req.params.id);
-  
+
   if (!subcategoryId || isNaN(subcategoryId)) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       success: false,
-      error: 'Valid subcategory ID is required' 
+      error: 'Valid subcategory ID is required'
     });
   }
 
   try {
     // Check if subcategory exists
     const existingSubcategory = await req.pool.query(
-      'SELECT id, name FROM subcategory WHERE id = $1', 
+      'SELECT id, name FROM subcategory WHERE id = $1',
       [subcategoryId]
     );
-    
+
     if (!existingSubcategory || !existingSubcategory.rows || existingSubcategory.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Subcategory not found' 
+        error: 'Subcategory not found'
       });
     }
 
     // Delete the subcategory
     await req.pool.query(
-      'DELETE FROM subcategory WHERE id = $1', 
+      'DELETE FROM subcategory WHERE id = $1',
       [subcategoryId]
     );
 
@@ -622,7 +637,7 @@ router.delete('/subcategories/:id', async (req, res) => {
     });
   } catch (err) {
     console.error('Error in DELETE /subcategories/:id:', err);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       error: err.message || 'Internal server error'
     });
