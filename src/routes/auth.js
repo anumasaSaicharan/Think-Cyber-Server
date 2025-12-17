@@ -62,11 +62,23 @@ router.get('/me', async (req, res) => {
 
 
 // Google SMTP config from .env
+// const transporter = nodemailer.createTransport({
+//   service: 'gmail',
+//   auth: {
+//     user: process.env.GMAIL_USER,
+//     pass: process.env.GMAIL_PASS
+//   }
+// });
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT),
+  secure: false,
   auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_PASS
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS
+  },
+  tls: {
+    rejectUnauthorized: false
   }
 });
 /**
@@ -155,7 +167,7 @@ router.post('/signup', async (req, res) => {
       [result.rows[0].id, otp, expiresAt]
     );
     await transporter.sendMail({
-      from: `"ThinkCyber Team" <${process.env.GMAIL_USER}>`,
+      from: `"ThinkCyber Team" <${process.env.SMTP_USER}>`,
       to: email,
       subject: "Verify Your ThinkCyber Account - OTP Inside",
       html: `
@@ -467,7 +479,7 @@ router.post('/send-otp', async (req, res) => {
       [user.id, otp, expiresAt]
     );
     await transporter.sendMail({
-      from: `"ThinkCyber Security" <${process.env.GMAIL_USER}>`,
+      from: `"ThinkCyber Security" <${process.env.SMTP_USER}>`,
       to: email,
       subject: "🔐 Your ThinkCyber Login OTP",
       html: `
@@ -705,7 +717,7 @@ router.post('/resend-otp', async (req, res) => {
     // Try to send email, but don't fail if email service is down
     try {
       await transporter.sendMail({
-        from: process.env.GMAIL_USER,
+        from: process.env.SMTP_USER,
         to: email,
         subject: 'Your ThinkCyber Login OTP',
         html: `<p>Your OTP is: <b>${otp}</b><br>This code is valid for 10 minutes.</p>`
