@@ -172,7 +172,7 @@ const pool = new Pool({
   password: process.env.PGPASSWORD,
   database: process.env.PGDATABASE,
   port: process.env.PGPORT,
-}); 
+});
 // Importing routes
 const customerRoutes = require('./routes/customer');
 const categoryRoutes = require('./routes/category');
@@ -186,6 +186,7 @@ const topicsModulesRoutes = require('./routes/topicsModules');
 const topicsVideosRoutes = require('./routes/topicsVideos');
 const uploadRoutes = require('./routes/upload');
 const uploadS3Routes = require('./routes/upload-s3');
+const contactRoutes = require('./routes/contact');
 const authRouter = require('./routes/auth');
 const enrollmentRoutes = require('./routes/enrollment');
 
@@ -232,6 +233,7 @@ app.use('/api', topicsModulesRoutes);
 app.use('/api', topicsVideosRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/upload-s3', uploadS3Routes);
+app.use('/api', contactRoutes);
 
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/auth', authRouter);

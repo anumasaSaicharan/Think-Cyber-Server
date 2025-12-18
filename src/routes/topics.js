@@ -866,29 +866,32 @@ router.get('/topics/:id', async (req, res) => {
       createdAt: module.created_at?.toISOString(),
       updatedAt: module.updated_at?.toISOString(),
       videos: videosResult.rows
-        .filter(video => video.module_id === module.id)
-        .map(video => ({
-          id: video.id,
-          topicId: video.topic_id,
-          moduleId: video.module_id,
-          title: video.title,
-          description: video.description,
-          videoUrl: video.video_url,
-          videoType: video.video_type,
-          thumbnailUrl: video.thumbnail_url,
-          thumbnail: video.thumbnail_url, // Alternative field name
-          durationSeconds: video.duration_seconds,
-          duration: video.duration_seconds ?
-            `${Math.floor(video.duration_seconds / 60)}:${(video.duration_seconds % 60).toString().padStart(2, '0')}` : "0:00",
-          orderIndex: video.order_index,
-          order: video.order_index, // Alternative field name
-          isActive: video.is_active,
-          isPreview: video.is_preview,
-          transcript: video.transcript,
-          resources: video.resources || [],
-          createdAt: video.created_at?.toISOString(),
-          updatedAt: video.updated_at?.toISOString()
-        }))
+        .filter(video => video.module_id == module.id)
+        .map(video => {
+          console.log(`[Topic Detail] Video: ${video.id}, DurationSeconds: ${video.duration_seconds} (Type: ${typeof video.duration_seconds})`);
+          return {
+            id: video.id,
+            topicId: video.topic_id,
+            moduleId: video.module_id,
+            title: video.title,
+            description: video.description,
+            videoUrl: video.video_url,
+            videoType: video.video_type,
+            thumbnailUrl: video.thumbnail_url,
+            thumbnail: video.thumbnail_url, // Alternative field name
+            durationSeconds: video.duration_seconds,
+            duration: video.duration_seconds ?
+              `${Math.floor(video.duration_seconds / 60)}:${(video.duration_seconds % 60).toString().padStart(2, '0')}` : "0:00",
+            orderIndex: video.order_index,
+            order: video.order_index, // Alternative field name
+            isActive: video.is_active,
+            isPreview: video.is_preview,
+            transcript: video.transcript,
+            resources: video.resources || [],
+            createdAt: video.created_at?.toISOString(),
+            updatedAt: video.updated_at?.toISOString()
+          };
+        })
     }));
 
     // Add additional fields to topic
@@ -1111,7 +1114,16 @@ router.put('/topics/:id', upload.single('thumbnail'), async (req, res) => {
               for (const [videoIndex, videoData] of moduleData.videos.entries()) {
                 if (videoData.id && typeof videoData.id === 'string' && videoData.id.startsWith('new-')) {
                   // This is a new video for the new module
-                  const durationSeconds = videoData.duration ? parseInt(videoData.duration) * 60 : 0;
+                  let durationSeconds = videoData.durationSeconds !== undefined ? parseInt(videoData.durationSeconds) : null;
+
+                  if (durationSeconds === null && videoData.duration !== undefined && videoData.duration !== null) {
+                    const dur = parseFloat(videoData.duration);
+                    if (!isNaN(dur)) {
+                      durationSeconds = Math.round(dur * 60);
+                    }
+                  }
+
+                  if (durationSeconds === null) durationSeconds = 0;
 
                   // Insert the video into topic_videos
                   const insertResult = await client.query(`
@@ -1175,18 +1187,28 @@ router.put('/topics/:id', upload.single('thumbnail'), async (req, res) => {
             }
 
             // Handle videos for this existing module
+            let existingVideoIds = [];
             if (moduleData.videos && Array.isArray(moduleData.videos)) {
               // Get existing videos for this module
               const existingVideosResult = await client.query(
                 'SELECT id FROM topic_videos WHERE module_id = $1',
                 [moduleId]
               );
-              const existingVideoIds = existingVideosResult.rows.map(v => v.id);
+              existingVideoIds = existingVideosResult.rows.map(v => v.id);
 
               for (const [videoIndex, videoData] of moduleData.videos.entries()) {
                 if (videoData.id && typeof videoData.id === 'string' && videoData.id.startsWith('new-')) {
                   // This is a new video for existing module
-                  const durationSeconds = videoData.duration ? parseInt(videoData.duration) * 60 : 0;
+                  let durationSeconds = videoData.durationSeconds !== undefined ? parseInt(videoData.durationSeconds) : null;
+
+                  if (durationSeconds === null && videoData.duration !== undefined && videoData.duration !== null) {
+                    const dur = parseFloat(videoData.duration);
+                    if (!isNaN(dur)) {
+                      durationSeconds = Math.round(dur * 60);
+                    }
+                  }
+
+                  if (durationSeconds === null) durationSeconds = 0;
 
                   // Insert the video into topic_videos
                   const insertResult = await client.query(`
@@ -1225,33 +1247,62 @@ router.put('/topics/:id', upload.single('thumbnail'), async (req, res) => {
                       WHERE filename = $4 AND upload_type = 'video'
                     `, [id.toString(), moduleId.toString(), videoId.toString(), filename]);
                   }
-                } else if (videoData.id && !isNaN(parseInt(videoData.id))) {
-                  // This is an existing video, update it
-                  const durationSeconds = videoData.duration ? parseInt(videoData.duration) * 60 : 0;
+                } else if (videoData.id && Number.isInteger(Number(videoData.id))) {
+                  // This is an existing video, update it safely
+
+                  let durationSeconds = null;
+
+                  // Check for durationSeconds first (precise)
+                  if (videoData.durationSeconds !== undefined && videoData.durationSeconds !== null) {
+                    durationSeconds = parseInt(videoData.durationSeconds);
+                  }
+                  // Fallback to duration string (minutes)
+                  else if (
+                    videoData.duration !== undefined &&
+                    videoData.duration !== null &&
+                    videoData.duration !== '' &&
+                    Number(videoData.duration) > 0
+                  ) {
+                    durationSeconds = Math.round(Number(videoData.duration) * 60);
+                  }
+
+
                   await client.query(`
                     UPDATE topic_videos 
-                    SET title = $1, description = $2, video_url = $3, duration_seconds = $4, order_index = $5, video_type = $6, is_preview = $7, updated_at = CURRENT_TIMESTAMP
+                    SET 
+                      title = $1,
+                      description = $2,
+                      video_url = $3,
+                      duration_seconds = COALESCE($4, duration_seconds),
+                      order_index = $5,
+                      video_type = $6,
+                      is_preview = $7,
+                      updated_at = CURRENT_TIMESTAMP
                     WHERE id = $8 AND module_id = $9
                   `, [
-                    videoData.title || 'Untitled Video',
+                    videoData.title?.trim() || 'Untitled Video',
                     videoData.description || '',
                     videoData.videoUrl || '',
-                    durationSeconds,
-                    videoData.order || videoIndex + 1,
+                    durationSeconds,                      // ✅ NEVER NaN
+                    Number.isInteger(Number(videoData.order))
+                      ? Number(videoData.order)
+                      : videoIndex + 1,                   // ✅ safe order
                     videoData.videoType || 'mp4',
-                    videoData.isPreview || false,
-                    videoData.id,
-                    moduleId
+                    Boolean(videoData.isPreview),
+                    Number(videoData.id),                 // ✅ safe integer
+                    Number(moduleId)
                   ]);
+                }
 
-                  // If the videoUrl looks like an uploaded file, link it in uploads table
-                  if (videoData.videoUrl && videoData.videoUrl.startsWith('/api/uploads/')) {
-                    // Extract filename from URL (e.g., /api/uploads/videos/filename.mp4 -> filename.mp4)
-                    const urlParts = videoData.videoUrl.split('/');
-                    const filename = urlParts[urlParts.length - 1];
 
-                    // Update uploads table to link this file to the topic structure
-                    await client.query(`
+                // If the videoUrl looks like an uploaded file, link it in uploads table
+                if (videoData.videoUrl && videoData.videoUrl.startsWith('/api/uploads/')) {
+                  // Extract filename from URL (e.g., /api/uploads/videos/filename.mp4 -> filename.mp4)
+                  const urlParts = videoData.videoUrl.split('/');
+                  const filename = urlParts[urlParts.length - 1];
+
+                  // Update uploads table to link this file to the topic structure
+                  await client.query(`
                       UPDATE uploads 
                       SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
                         'topic_id', $1::text,
@@ -1261,21 +1312,20 @@ router.put('/topics/:id', upload.single('thumbnail'), async (req, res) => {
                       )
                       WHERE filename = $4 AND upload_type = 'video'
                     `, [id.toString(), moduleId.toString(), videoData.id.toString(), filename]);
-                  }
+                }
 
-                  // Remove this video ID from the existing list
-                  const videoIdNum = parseInt(videoData.id);
-                  const index = existingVideoIds.indexOf(videoIdNum);
-                  if (index > -1) {
-                    existingVideoIds.splice(index, 1);
-                  }
+                // Remove this video ID from the existing list
+                const videoIdNum = parseInt(videoData.id);
+                const index = existingVideoIds.indexOf(videoIdNum);
+                if (index > -1) {
+                  existingVideoIds.splice(index, 1);
                 }
               }
+            }
 
-              // Delete any videos that weren't in the update (removed videos)
-              for (const videoId of existingVideoIds) {
-                await client.query('DELETE FROM topic_videos WHERE id = $1', [videoId]);
-              }
+            // Delete any videos that weren't in the update (removed videos)
+            for (const videoId of existingVideoIds) {
+              await client.query('DELETE FROM topic_videos WHERE id = $1', [videoId]);
             }
           }
         }
@@ -1335,7 +1385,8 @@ router.put('/topics/:id', upload.single('thumbnail'), async (req, res) => {
         id: video.id,
         title: video.title,
         description: video.description || '',
-        duration: video.duration_seconds ? Math.ceil(video.duration_seconds / 60).toString() : '0',
+        duration: video.duration_seconds ?
+          `${Math.floor(video.duration_seconds / 60)}:${(video.duration_seconds % 60).toString().padStart(2, '0')}` : "0:00",
         videoUrl: video.video_url,
         thumbnail: video.thumbnail_url || '',
         thumbnailUrl: video.thumbnail_url,

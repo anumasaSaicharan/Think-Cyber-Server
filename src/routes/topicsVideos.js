@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
-const { uploadToS3, deleteFromS3 } = require('../utils/s3-helper');
+const { uploadToS3, uploadFileToS3, deleteFromS3 } = require('../utils/s3-helper');
 const ffmpeg = require('fluent-ffmpeg');
 const { Readable } = require('stream');
 const ffprobe = require('ffprobe-static');
@@ -13,8 +13,21 @@ const router = express.Router();
 // Set ffprobe path
 ffmpeg.setFfprobePath(ffprobe.path);
 
-// Configure multer for memory storage (S3 upload)
-const storage = multer.memoryStorage();
+// Configure multer for disk storage
+const uploadDir = path.join(os.tmpdir(), 'upload-videos');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + crypto.randomUUID();
+    cb(null, `video-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
 
 const fileFilter = (req, file, cb) => {
   const allowedTypes = ['video/mp4', 'video/webm', 'video/avi', 'video/mov', 'video/wmv'];
@@ -29,7 +42,7 @@ const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 1000 * 1024 * 1024 // 1GB max (S3 supports larger files)
+    fileSize: 1000 * 1024 * 1024 // 1GB max
   }
 });
 
@@ -41,46 +54,36 @@ const validateFileSize = (file) => {
   }
 };
 
-// Helper function to get video duration from buffer
-const getVideoDurationFromBuffer = async (buffer) => {
-  const tempFilePath = path.join(os.tmpdir(), `temp-video-${crypto.randomUUID()}.mp4`);
+// Helper function to get video duration from file path
+const getVideoDurationFromPath = async (filePath) => {
+  return new Promise((resolve, reject) => {
+    // Only run metadata probe, no full analysis
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        console.error('ffprobe error:', err);
+        return resolve(0); // Resolve with 0 on error
+      }
 
-  try {
-    console.log('Writing buffer to temp file:', tempFilePath, 'Size:', buffer.length);
-    fs.writeFileSync(tempFilePath, buffer);
+      // Check metadata.format.duration first
+      let duration = parseFloat(metadata.format?.duration);
 
-    return new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(tempFilePath, (err, metadata) => {
-        // Always cleanup temp file
-        try {
-          if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-        } catch (e) {
-          console.error('Error deleting temp file:', e);
+      // Fallback to video stream duration if format duration is missing/invalid
+      if (!duration || isNaN(duration) || duration <= 0) {
+        const videoStream = metadata.streams?.find(s => s.codec_type === 'video');
+        if (videoStream?.duration) {
+          duration = parseFloat(videoStream.duration);
         }
+      }
 
-        if (err) {
-          console.error('ffprobe error:', err);
-          resolve(0); // Resolve with 0 on error
-          return;
-        }
+      console.log(`Duration check for ${filePath}: ${duration}s`);
 
-        // Log metadata for debugging
-        // console.log('ffprobe metadata:', JSON.stringify(metadata.format, null, 2));
-
-        const duration = metadata.format.duration;
-        console.log('Found duration:', duration);
-        resolve(duration ? parseFloat(duration) : 0);
-      });
+      if (!duration || isNaN(duration) || duration <= 0) {
+        resolve(0);
+      } else {
+        resolve(duration);
+      }
     });
-
-  } catch (error) {
-    console.error('Error in getVideoDurationFromBuffer:', error);
-    // Cleanup if error occurs before ffprobe callback
-    if (fs.existsSync(tempFilePath)) {
-      try { fs.unlinkSync(tempFilePath); } catch (e) { }
-    }
-    return 0;
-  }
+  });
 };
 
 // VIDEOS ROUTES
@@ -603,8 +606,9 @@ router.delete('/topics/:topicId/modules/:moduleId/videos/:videoId', async (req, 
   }
 });
 
-// POST /api/topics/:topicId/modules/:moduleId/videos/upload - Upload video file
+// POST /api/topics/:topicId/modules/:moduleId/videos/upload - FIXED Single Video Upload
 router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('video'), async (req, res) => {
+  let uploadedFilePath = null;
   try {
     const { topicId, moduleId } = req.params;
     const { title, description, duration, order } = req.body;
@@ -616,6 +620,9 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
       });
     }
 
+    uploadedFilePath = req.file.path;
+    console.log('✅ Processing SINGLE video upload:', uploadedFilePath, req.file.originalname);
+
     if (!title || !title.trim()) {
       return res.status(400).json({
         success: false,
@@ -623,38 +630,56 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
       });
     }
 
-    validateFileSize(req.file);
-
-    // Verify topic and module exist
+    // Verify topic/module exist
     if (req.pool) {
-      const topicCheck = await req.pool.query(
-        'SELECT id FROM topics WHERE id = $1',
-        [topicId]
-      );
-
+      const topicCheck = await req.pool.query('SELECT id FROM topics WHERE id = $1', [topicId]);
       if (topicCheck.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Topic not found'
-        });
+        return res.status(404).json({ success: false, error: 'Topic not found' });
       }
 
       const moduleCheck = await req.pool.query(
         'SELECT id FROM topic_modules WHERE id = $1 AND topic_id = $2',
         [moduleId, topicId]
       );
-
       if (moduleCheck.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Module not found in this topic'
-        });
+        return res.status(404).json({ success: false, error: 'Module not found in this topic' });
       }
     }
 
-    // Upload to S3
-    const s3Result = await uploadToS3(req.file.buffer, req.file.originalname, req.file.mimetype, 'videos');
+    // ✅ 1. DURATION FIRST - File guaranteed to exist
+    let durationSeconds = 1; // Safe minimum
+    const clientDuration = duration;
 
+    // File exists verification
+    if (!fs.existsSync(uploadedFilePath)) {
+      throw new Error(`File missing before processing: ${uploadedFilePath}`);
+    }
+
+    try {
+      // Import FIXED getVideoDurationFromPath from s3-helper
+      const { getVideoDurationFromPath } = require('../utils/s3-helper');
+      durationSeconds = await getVideoDurationFromPath(uploadedFilePath);
+      console.log(`✅ FFProbe SUCCESS ${req.file.originalname}: ${durationSeconds}s`);
+    } catch (durErr) {
+      console.warn(`⚠️ FFProbe FAILED ${req.file.originalname}:`, durErr.message);
+      // Fallback to client duration (MM:SS or minutes → seconds)
+      if (clientDuration && !isNaN(parseFloat(clientDuration)) && parseFloat(clientDuration) > 0) {
+        durationSeconds = Math.round(parseFloat(clientDuration) * 60);
+        console.log(`✅ Client fallback duration: ${durationSeconds}s`);
+      } else {
+        console.warn(`⚠️ No valid fallback, using default: 1s`);
+      }
+    }
+
+    // Ensure positive integer
+    durationSeconds = Math.max(Math.round(durationSeconds), 1);
+    console.log(`🎯 FINAL duration for DB: ${durationSeconds}s`);
+
+    // ✅ 2. THEN S3 upload (file still exists)
+    const s3Result = await uploadFileToS3(uploadedFilePath, req.file.originalname, req.file.mimetype, 'videos');
+    console.log(`✅ S3 upload success: ${s3Result.url}`);
+
+    // ✅ 3. THEN DB insert with confirmed duration
     const fileData = {
       id: crypto.randomUUID(),
       url: s3Result.url,
@@ -665,169 +690,120 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload', upload.single('v
       uploadedAt: new Date().toISOString(),
       title: title.trim(),
       description: description?.trim() || '',
-      duration: duration || '0',
       order: parseInt(order) || 1,
-      topicId: topicId,
-      moduleId: moduleId
     };
 
+    console.log(`📹 Saving to DB: "${fileData.title}" (${durationSeconds}s) → ${s3Result.url}`);
+
     let videoId = null;
-
-    // Save to topic_videos table
     if (req.pool) {
-      try {
-        // Calculate duration if not provided or just to be safe/accurate
-        let durationSeconds = 0;
-        try {
-          const calculatedDuration = await getVideoDurationFromBuffer(req.file.buffer);
-          if (calculatedDuration > 0) {
-            durationSeconds = calculatedDuration;
-          } else if (duration) {
-            durationSeconds = parseFloat(duration) * 60;
+      const videoResult = await req.pool.query(`
+        INSERT INTO topic_videos (
+          topic_id, module_id, title, description, video_url, 
+          duration_seconds, video_type, order_index, is_active, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10)
+        RETURNING id, title, description, video_url, duration_seconds, order_index, is_active, created_at, updated_at
+      `, [
+        topicId, moduleId, fileData.title, fileData.description, fileData.url,
+        durationSeconds, 'mp4', fileData.order, new Date(), new Date()
+      ]);
+
+      const video = videoResult.rows[0];
+      videoId = video.id;
+
+      console.log(`✅ DB saved! Video ID: ${videoId}, Duration: ${video.duration_seconds}s`);
+
+      // Update aggregate durations
+      await req.pool.query(`
+        UPDATE topic_modules SET 
+        duration_minutes = (
+          SELECT CEIL(COALESCE(SUM(duration_seconds), 0) / 60.0)::int 
+          FROM topic_videos WHERE module_id = $1
+        ), updated_at = CURRENT_TIMESTAMP 
+        WHERE id = $1
+      `, [moduleId]);
+
+      await req.pool.query(`
+        UPDATE topics SET 
+        duration_minutes = (
+          SELECT COALESCE(SUM(tm.duration_minutes), 0) 
+          FROM topic_modules tm WHERE tm.topic_id = $1
+        ), updated_at = CURRENT_TIMESTAMP 
+        WHERE id = $1
+      `, [topicId]);
+
+      // Save upload metadata
+      await req.pool.query(`
+        INSERT INTO uploads (id, filename, original_name, file_path, file_size, mime_type, upload_type, category, metadata, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `, [
+        fileData.id, fileData.filename, fileData.originalName, fileData.url,
+        fileData.size, fileData.mimeType, 'video', 'topic-videos',
+        JSON.stringify({
+          title: fileData.title,
+          description: fileData.description,
+          duration: durationSeconds,
+          topicId: parseInt(topicId),
+          moduleId: parseInt(moduleId),
+          videoId: videoId,
+          order: fileData.order,
+          linkedAt: new Date().toISOString()
+        }),
+        new Date()
+      ]);
+
+      res.json({
+        success: true,
+        data: {
+          id: video.id,
+          title: video.title,
+          description: video.description || '',
+          videoUrl: video.video_url,
+          durationSeconds: video.duration_seconds,  // ✅ CORRECT!
+          duration: Math.floor(video.duration_seconds / 60).toString().padStart(2, '0') + ':' +
+            (video.duration_seconds % 60).toString().padStart(2, '0'),  // MM:SS
+          order: video.order_index,
+          isActive: video.is_active,
+          createdAt: video.created_at?.toISOString(),
+          updatedAt: video.updated_at?.toISOString(),
+          uploadInfo: {
+            uploadId: fileData.id,
+            filename: fileData.filename,
+            s3Key: fileData.filename,
+            originalName: fileData.originalName,
+            size: fileData.size
           }
-        } catch (durErr) {
-          console.warn('Failed to calculate duration, falling back to provided duration:', durErr);
-          if (duration) durationSeconds = parseFloat(duration) * 60;
-        }
-
-        const videoResult = await req.pool.query(`
-          INSERT INTO topic_videos (
-            topic_id,
-            module_id, 
-            title, 
-            description, 
-            video_url, 
-            duration_seconds, 
-            video_type, 
-            order_index,
-            created_at,
-            updated_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-          RETURNING id, title, description, video_url, duration_seconds, order_index, created_at, updated_at
-        `, [
-          topicId,
-          moduleId,
-          fileData.title,
-          fileData.description,
-          fileData.url,
-          durationSeconds,
-          'mp4',
-          fileData.order,
-          new Date(),
-          new Date()
-        ]);
-
-        const video = videoResult.rows[0];
-        videoId = video.id;
-
-        // Update module duration
-        await req.pool.query(`
-          UPDATE topic_modules 
-          SET duration_minutes = (
-            SELECT COALESCE(SUM(duration_seconds), 0) / 60 
-            FROM topic_videos 
-            WHERE module_id = $1
-          ),
-          updated_at = CURRENT_TIMESTAMP
-          WHERE id = $1
-        `, [moduleId]);
-
-        // Update topic duration
-        await req.pool.query(`
-          UPDATE topics 
-          SET duration_minutes = (
-            SELECT COALESCE(SUM(tm.duration_minutes), 0)
-            FROM topic_modules tm 
-            WHERE tm.topic_id = $1
-          ),
-          updated_at = CURRENT_TIMESTAMP
-          WHERE id = $1
-        `, [topicId]);
-
-        // Save upload metadata with proper linking
-        await req.pool.query(`
-          INSERT INTO uploads (id, filename, original_name, file_path, file_size, mime_type, upload_type, category, metadata, created_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        `, [
-          fileData.id,
-          fileData.filename,
-          fileData.originalName,
-          fileData.url,
-          fileData.size,
-          fileData.mimeType,
-          'video',
-          'topic-videos',
-          JSON.stringify({
-            title: fileData.title,
-            description: fileData.description,
-            duration: fileData.duration,
-            topicId: parseInt(topicId),
-            moduleId: parseInt(moduleId),
-            videoId: videoId,
-            order: fileData.order,
-            linkedAt: new Date().toISOString()
-          }),
-          new Date()
-        ]);
-
-        // Return formatted video data
-        res.json({
-          success: true,
-          data: {
-            id: video.id,
-            title: video.title,
-            description: video.description,
-            duration: (video.duration_seconds / 60).toString(),
-            videoUrl: video.video_url,
-            thumbnail: '',
-            thumbnailUrl: null,
-            order: video.order_index,
-            orderIndex: video.order_index,
-            videoType: 'mp4',
-            durationSeconds: video.duration_seconds,
-            isPreview: false,
-            transcript: null,
-            createdAt: video.created_at?.toISOString(),
-            updatedAt: video.updated_at?.toISOString(),
-            // Upload metadata
-            uploadInfo: {
-              uploadId: fileData.id,
-              filename: fileData.filename,
-              originalName: fileData.originalName,
-              size: fileData.size,
-              mimeType: fileData.mimeType,
-              uploadedAt: fileData.uploadedAt
-            }
-          },
-          message: 'Video uploaded successfully to module'
-        });
-
-      } catch (dbError) {
-        console.error('Failed to save video to database:', dbError);
-        return res.status(500).json({
-          success: false,
-          error: 'Failed to save video to database: ' + dbError.message
-        });
-      }
-    } else {
-      return res.status(500).json({
-        success: false,
-        error: 'Database connection not available'
+        },
+        message: `Video "${video.title}" uploaded successfully (${video.duration_seconds}s)`
       });
+
+    } else {
+      throw new Error('Database connection missing');
     }
 
   } catch (err) {
-    console.error('Error in POST /topics/:topicId/modules/:moduleId/videos/upload:', err);
-    res.status(400).json({
+    console.error('❌ Error in POST /videos/upload:', err);
+    res.status(500).json({
       success: false,
-      error: err.message || 'Failed to upload video'
+      error: err.message
     });
+  } finally {
+    // ✅ Cleanup temp file AFTER all processing
+    if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+      try {
+        fs.unlinkSync(uploadedFilePath);
+        console.log('🧹 Cleaned up temp file:', uploadedFilePath);
+      } catch (e) {
+        console.error('Failed to delete temp file:', uploadedFilePath, e);
+      }
+    }
   }
 });
 
+
 // POST /api/topics/:topicId/modules/:moduleId/videos/upload-multiple - Upload multiple videos
 router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.array('videos', 10), async (req, res) => {
+  const uploadedFiles = [];
   try {
     const { topicId, moduleId } = req.params;
 
@@ -838,44 +814,55 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
       });
     }
 
+    // Keep track for cleanup
+    req.files.forEach(f => uploadedFiles.push(f.path));
+
     // Verify topic and module exist
     if (req.pool) {
-      const topicCheck = await req.pool.query(
-        'SELECT id FROM topics WHERE id = $1',
-        [topicId]
-      );
+      const topicCheck = await req.pool.query('SELECT id FROM topics WHERE id = $1', [topicId]);
+      if (topicCheck.rows.length === 0) return res.status(404).json({ success: false, error: 'Topic not found' });
 
-      if (topicCheck.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Topic not found'
-        });
-      }
-
-      const moduleCheck = await req.pool.query(
-        'SELECT id FROM topic_modules WHERE id = $1 AND topic_id = $2',
-        [moduleId, topicId]
-      );
-
-      if (moduleCheck.rows.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: 'Module not found in this topic'
-        });
-      }
+      const moduleCheck = await req.pool.query('SELECT id FROM topic_modules WHERE id = $1 AND topic_id = $2', [moduleId, topicId]);
+      if (moduleCheck.rows.length === 0) return res.status(404).json({ success: false, error: 'Module not found in this topic' });
     }
 
     const results = [];
     const errors = [];
 
-    // Process each video file
-    for (let i = 0; i < req.files.length; i++) {
-      const file = req.files[i];
+    // Process videos in parallel
+    const uploadPromises = req.files.map(async (file, i) => {
       try {
-        validateFileSize(file);
+        // Calculate Duration
+        let durationSeconds = 0;
+        const clientDuration = req.body.durations?.[i];
 
-        // Upload to S3
-        const s3Result = await uploadToS3(file.buffer, file.originalname, file.mimetype, 'videos');
+        try {
+          // Note: multiple ffprobes might be CPU intensive, but much faster than sequential
+          const calculatedDuration = await getVideoDurationFromPath(file.path);
+          if (calculatedDuration > 0) {
+            durationSeconds = calculatedDuration;
+          } else {
+            console.warn(`Duration invalid for ${file.originalname}, checking fallback`);
+            if (clientDuration && !isNaN(parseFloat(clientDuration)) && parseFloat(clientDuration) > 0) {
+              durationSeconds = parseFloat(clientDuration) * 60;
+            } else {
+              durationSeconds = 1;
+            }
+          }
+        } catch (durErr) {
+          console.warn('Duration calculation error for ' + file.originalname, durErr);
+          if (clientDuration && !isNaN(parseFloat(clientDuration)) && parseFloat(clientDuration) > 0) {
+            durationSeconds = parseFloat(clientDuration) * 60;
+          } else {
+            durationSeconds = 1;
+          }
+        }
+
+        // Ensure integer for DB
+        durationSeconds = Math.round(durationSeconds);
+
+        // Upload to S3 (Parallel thanks to Promise.all)
+        const s3Result = await uploadFileToS3(file.path, file.originalname, file.mimetype, 'videos');
 
         const fileData = {
           id: crypto.randomUUID(),
@@ -887,78 +874,55 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
           uploadedAt: new Date().toISOString(),
           title: req.body.titles?.[i] || file.originalname.replace(/\.[^/.]+$/, ''),
           description: req.body.descriptions?.[i] || '',
-          duration: req.body.durations?.[i] || '0',
           order: parseInt(req.body.orders?.[i] || (i + 1)),
           topicId: topicId,
           moduleId: moduleId
         };
 
         let videoId = null;
+        const finalDuration = parseInt(Math.round(durationSeconds), 10);
+        // Confirm duration before insert
+        console.log(`[Video Upload] Title: ${file.originalname}, Calculated Duration: ${durationSeconds}`);
+        console.log(`🎯 FINAL: ${finalDuration}s (type: ${typeof finalDuration})`);
 
-        // Save to topic_videos table
         if (req.pool) {
-          let durationSeconds = 0;
-          try {
-            // Calculate duration from buffer
-            const calculatedDuration = await getVideoDurationFromBuffer(file.buffer);
-            if (calculatedDuration > 0) {
-              durationSeconds = calculatedDuration;
-            } else if (fileData.duration) {
-              durationSeconds = parseFloat(fileData.duration) * 60;
-            }
-          } catch (durErr) {
-            console.warn('Failed to calculate duration for file ' + file.originalname, durErr);
-            if (fileData.duration) durationSeconds = parseFloat(fileData.duration) * 60;
-          }
-
           const videoResult = await req.pool.query(`
             INSERT INTO topic_videos (
-              topic_id,
-              module_id, 
-              title, 
-              description, 
-              video_url, 
-              duration_seconds, 
-              video_type, 
-              order_index,
-              created_at,
-              updated_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING id, title, description, video_url, duration_seconds, order_index, created_at, updated_at
+              topic_id, module_id, title, description, video_url, 
+              duration_seconds, video_type, order_index, is_active, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            RETURNING id, title, description, video_url, duration_seconds, order_index, is_active, created_at, updated_at
           `, [
-            topicId,
-            moduleId,
-            fileData.title,
-            fileData.description,
-            fileData.url,
-            durationSeconds,
-            'mp4',
-            fileData.order,
-            new Date(),
-            new Date()
+            topicId,          // $1
+            moduleId,         // $2  
+            fileData.title,   // $3
+            fileData.description, // $4
+            fileData.url,     // $5
+            Math.max(1, Number(finalDuration)),    // $6  ← INTEGER!
+            'mp4',            // $7
+            fileData.order,   // $8
+            true,             // $9  ← is_active
+            new Date(),       // $10
+            new Date()        // $11
           ]);
+          console.log(
+            `🧪 DB CONFIRM: id=${videoResult.rows[0].id}, duration_seconds=${videoResult.rows[0].duration_seconds}`
+          );
 
           const video = videoResult.rows[0];
           videoId = video.id;
 
-          // Save upload metadata with proper linking
+          // Save upload metadata
           await req.pool.query(`
             INSERT INTO uploads (id, filename, original_name, file_path, file_size, mime_type, upload_type, category, metadata, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
           `, [
-            fileData.id,
-            fileData.filename,
-            fileData.originalName,
-            fileData.url, // Use the URL instead of file path for consistency
-            fileData.size,
-            fileData.mimeType,
-            'video',
-            'topic-videos',
+            fileData.id, fileData.filename, fileData.originalName, fileData.url,
+            fileData.size, fileData.mimeType, 'video', 'topic-videos',
             JSON.stringify({
               title: fileData.title,
               description: fileData.description,
-              duration: fileData.duration,
+              duration: durationSeconds,
               topicId: parseInt(topicId),
               moduleId: parseInt(moduleId),
               videoId: videoId,
@@ -969,67 +933,60 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
             new Date()
           ]);
 
-          results.push({
-            id: video.id,
-            title: video.title,
-            description: video.description,
-            duration: (video.duration_seconds / 60).toString(),
-            videoUrl: video.video_url,
-            thumbnail: '',
-            thumbnailUrl: null,
-            order: video.order_index,
-            orderIndex: video.order_index,
-            videoType: 'mp4',
-            durationSeconds: video.duration_seconds,
-            isPreview: false,
-            transcript: null,
-            createdAt: video.created_at?.toISOString(),
-            updatedAt: video.updated_at?.toISOString(),
-            uploadInfo: {
-              uploadId: fileData.id,
-              filename: fileData.filename,
-              originalName: fileData.originalName,
-              size: fileData.size,
-              mimeType: fileData.mimeType,
-              uploadedAt: fileData.uploadedAt
+          return {
+            success: true,
+            data: {
+              id: video.id,
+              title: video.title,
+              videoUrl: video.video_url, // Proof of S3 URL
+              s3Key: fileData.filename,
+              durationSeconds: video.duration_seconds,
+              order: video.order_index,
             }
-          });
+          };
         }
-
       } catch (fileError) {
-        errors.push({
-          filename: file.originalname,
-          error: fileError.message
-        });
+        console.error(`Error processing file ${file.originalname}:`, fileError);
+        return {
+          success: false,
+          error: {
+            filename: file.originalname,
+            error: fileError.message
+          }
+        };
       }
-    }
+    });
 
-    // Update module and topic durations after all uploads
+    // Wait for all uploads to finish
+    const processingResults = [];
+    for (let i = 0; i < uploadPromises.length; i++) {
+      processingResults.push(await uploadPromises[i]);
+    }
+    // Separate successes and errors
+    processingResults.forEach(r => {
+      if (r && r.success) {
+        results.push(r.data);
+      } else if (r && !r.success) {
+        errors.push(r.error);
+      }
+    });
+
+    // Update aggregate durations
     if (req.pool && results.length > 0) {
       try {
         await req.pool.query(`
-          UPDATE topic_modules 
-          SET duration_minutes = (
-            SELECT COALESCE(SUM(duration_seconds), 0) / 60 
-            FROM topic_videos 
-            WHERE module_id = $1
-          ),
-          updated_at = CURRENT_TIMESTAMP
-          WHERE id = $1
+          UPDATE topic_modules SET duration_minutes = (
+            SELECT CEIL(COALESCE(SUM(duration_seconds), 0) / 60.0)::int FROM topic_videos WHERE module_id = $1
+          ), updated_at = CURRENT_TIMESTAMP WHERE id = $1
         `, [moduleId]);
 
         await req.pool.query(`
-          UPDATE topics 
-          SET duration_minutes = (
-            SELECT COALESCE(SUM(tm.duration_minutes), 0)
-            FROM topic_modules tm 
-            WHERE tm.topic_id = $1
-          ),
-          updated_at = CURRENT_TIMESTAMP
-          WHERE id = $1
+          UPDATE topics SET duration_minutes = (
+            SELECT COALESCE(SUM(tm.duration_minutes), 0) FROM topic_modules tm WHERE tm.topic_id = $1
+          ), updated_at = CURRENT_TIMESTAMP WHERE id = $1
         `, [topicId]);
-      } catch (updateError) {
-        console.warn('Failed to update durations:', updateError);
+      } catch (e) {
+        console.warn("Duration update failed:", e);
       }
     }
 
@@ -1041,15 +998,23 @@ router.post('/topics/:topicId/modules/:moduleId/videos/upload-multiple', upload.
         totalUploaded: results.length,
         totalErrors: errors.length
       },
-      message: `Bulk video upload completed: ${results.length} videos uploaded successfully${errors.length > 0 ? `, ${errors.length} files failed` : ''}`
+      message: `Bulk processed: ${results.length} success, ${errors.length} failed`
     });
 
   } catch (err) {
-    console.error('Error in POST /topics/:topicId/modules/:moduleId/videos/upload-multiple:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message || 'Failed to upload videos'
-    });
+    console.error('Error in POST /upload-multiple:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    // Cleanup all uploaded files from disk
+    for (const filePath of uploadedFiles) {
+      if (fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch (e) {
+          console.error('Failed to cleanup:', filePath, e);
+        }
+      }
+    }
   }
 });
 
