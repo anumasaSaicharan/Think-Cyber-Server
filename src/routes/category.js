@@ -21,14 +21,14 @@ const router = express.Router();
  *         name: sortBy
  *         schema:
  *           type: string
- *           enum: [id, name, description, status, topicsCount, createdAt, updatedAt]
- *         description: Field to sort by (default id)
+ *           enum: [id, name, description, status, topicsCount, createdAt, updatedAt, priority]
+ *         description: Field to sort by (default priority)
  *       - in: query
  *         name: sortOrder
  *         schema:
  *           type: string
  *           enum: [asc, desc]
- *         description: Sort order (default asc)
+ *         description: Sort order (default desc)
  *     responses:
  *       200:
  *         description: List of categories with pagination info
@@ -161,14 +161,14 @@ router.get('/categories', async (req, res) => {
     // Extract query parameters with defaults
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const sortBy = req.query.sortBy || 'id';
+    const sortBy = req.query.sortBy || 'priority';
     const sortOrder = req.query.sortOrder === 'desc' ? 'DESC' : 'ASC';
     const offset = (page - 1) * limit;
 
     // Validate sortBy field to prevent SQL injection
-    const allowedSortFields = ['id', 'name', 'description', 'price', 'status', 'topicsCount', 'topics_count', 'createdAt', 'created_at', 'updatedAt', 'updated_at'];
-    let sortField = allowedSortFields.includes(sortBy) ? sortBy : 'id';
-
+    const allowedSortFields = ['id', 'name', 'description', 'price', 'bundle_price', 'plan_type', 'status', 'topicsCount', 'topics_count', 'createdAt', 'created_at', 'updatedAt', 'updated_at', 'priority'];
+    let sortField = allowedSortFields.includes(sortBy) ? sortBy : 'priority';
+    
     // Map camelCase to snake_case for database columns
     if (sortField === 'createdAt') {
       sortField = 'created_at';
@@ -186,10 +186,17 @@ router.get('/categories', async (req, res) => {
         id,
         name,
         description,
+        subscription_plan_id,
+        plan_type,
+        bundle_price,
         price,
+        annual_subscription,
+        bundled_access,
+        future_topics_included,
+        flexible_purchase,
         topics_count,
         status,
-        display_order,
+        priority,
         created_at,
         updated_at
       FROM category 
@@ -217,10 +224,17 @@ router.get('/categories', async (req, res) => {
       id: row.id,
       name: row.name,
       description: row.description,
+      subscription_plan_id: row.subscription_plan_id,
+      plan_type: row.plan_type,
+      bundle_price: row.bundle_price,
       price: row.price,
+      annual_subscription: !!row.annual_subscription,
+      bundled_access: !!row.bundled_access,
+      future_topics_included: !!row.future_topics_included,
+      flexible_purchase: !!row.flexible_purchase,
       topicsCount: row.topics_count,
       status: row.status,
-      displayOrder: row.display_order,
+      priority: row.priority,
       createdAt: row.created_at ? row.created_at.toISOString().split('T')[0] : null,
       updatedAt: row.updated_at ? row.updated_at.toISOString().split('T')[0] : null
     }));
@@ -248,8 +262,12 @@ router.get('/categories', async (req, res) => {
 
 // Sample POST category
 router.post('/categories', async (req, res) => {
-  const { name, description, price, status, displayOrder } = req.body;
-
+  const { name, description, price, status, plan_type, bundle_price, subscription_plan_id, priority = 0,
+    annual_subscription = false,
+    bundled_access = false,
+    future_topics_included = false,
+    flexible_purchase = false } = req.body;
+  
   if (!name || name.trim() === '') {
     return res.status(400).json({
       success: false,
@@ -268,13 +286,38 @@ router.post('/categories', async (req, res) => {
   const validStatuses = ['Active', 'Inactive', 'Draft'];
   const categoryStatus = status && validStatuses.includes(status) ? status : 'Active';
 
-  // Default display order to 0 if not provided
-  const order = displayOrder !== undefined && displayOrder !== null ? parseInt(displayOrder) : 0;
+  // Validate plan type
+  const validPlanTypes = ['FREE', 'INDIVIDUAL', 'BUNDLE', 'FLEXIBLE'];
+  if (!plan_type || !validPlanTypes.includes(plan_type)) {
+    return res.status(400).json({
+      success: false,
+      error: 'plan_type is required and must be one of FREE, INDIVIDUAL, BUNDLE, FLEXIBLE'
+    });
+  }
+
+  if (!subscription_plan_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'subscription_plan_id is required'
+    });
+  }
+
+  const normalizedBundlePrice = (plan_type === 'BUNDLE' || plan_type === 'FLEXIBLE') ? Number(bundle_price || 0) : 0;
+  if ((plan_type === 'BUNDLE' || plan_type === 'FLEXIBLE') && (!normalizedBundlePrice || normalizedBundlePrice <= 0)) {
+    return res.status(400).json({
+      success: false,
+      error: 'bundle_price must be greater than 0 for BUNDLE or FLEXIBLE plan types'
+    });
+  }
 
   try {
     const result = await req.pool.query(
-      'INSERT INTO category (name, description, price, status, display_order) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [name.trim(), description.trim(), price, categoryStatus, order]
+      `INSERT INTO category (name, description, price, status, plan_type, bundle_price, subscription_plan_id, priority,
+        annual_subscription, bundled_access, future_topics_included, flexible_purchase)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING *`, 
+      [name.trim(), description.trim(), price, categoryStatus, plan_type, normalizedBundlePrice, subscription_plan_id, priority,
+        !!annual_subscription, !!bundled_access, !!future_topics_included, !!flexible_purchase]
     );
 
     // Format the response data
@@ -282,7 +325,15 @@ router.post('/categories', async (req, res) => {
       id: result.rows[0].id,
       name: result.rows[0].name,
       description: result.rows[0].description,
+      subscription_plan_id: result.rows[0].subscription_plan_id,
+      plan_type: result.rows[0].plan_type,
+      bundle_price: result.rows[0].bundle_price,
       price: result.rows[0].price,
+      priority: result.rows[0].priority,
+      annual_subscription: !!result.rows[0].annual_subscription,
+      bundled_access: !!result.rows[0].bundled_access,
+      future_topics_included: !!result.rows[0].future_topics_included,
+      flexible_purchase: !!result.rows[0].flexible_purchase,
       topicsCount: result.rows[0].topics_count || 0,
       status: result.rows[0].status,
       createdAt: result.rows[0].created_at ? result.rows[0].created_at.toISOString().split('T')[0] : null,
@@ -306,8 +357,12 @@ router.post('/categories', async (req, res) => {
 // PUT update category by ID
 router.put('/categories/:id', async (req, res) => {
   const categoryId = parseInt(req.params.id);
-  const { name, description, price, status, displayOrder } = req.body;
-
+  const { name, description, price, status, plan_type, bundle_price, subscription_plan_id, priority,
+    annual_subscription = false,
+    bundled_access = false,
+    future_topics_included = false,
+    flexible_purchase = false } = req.body;
+  
   if (!categoryId || isNaN(categoryId)) {
     return res.status(400).json({
       success: false,
@@ -332,6 +387,30 @@ router.put('/categories/:id', async (req, res) => {
   // Validate status if provided
   const validStatuses = ['Active', 'Inactive', 'Draft'];
   const categoryStatus = status && validStatuses.includes(status) ? status : 'Active';
+
+  // Validate plan type
+  const validPlanTypes = ['FREE', 'INDIVIDUAL', 'BUNDLE', 'FLEXIBLE'];
+  if (!plan_type || !validPlanTypes.includes(plan_type)) {
+    return res.status(400).json({
+      success: false,
+      error: 'plan_type is required and must be one of FREE, INDIVIDUAL, BUNDLE, FLEXIBLE'
+    });
+  }
+
+  if (!subscription_plan_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'subscription_plan_id is required'
+    });
+  }
+
+  const normalizedBundlePrice = (plan_type === 'BUNDLE' || plan_type === 'FLEXIBLE') ? Number(bundle_price || 0) : 0;
+  if ((plan_type === 'BUNDLE' || plan_type === 'FLEXIBLE') && (!normalizedBundlePrice || normalizedBundlePrice <= 0)) {
+    return res.status(400).json({
+      success: false,
+      error: 'bundle_price must be greater than 0 for BUNDLE or FLEXIBLE plan types'
+    });
+  }
 
   try {
     // Check if category exists
@@ -378,8 +457,13 @@ router.put('/categories/:id', async (req, res) => {
     // So I will require them to send it or default to 0.
 
     const result = await req.pool.query(
-      'UPDATE category SET name = $1, description = $2, price = $3, status = $4, display_order = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
-      [name.trim(), description.trim(), price, categoryStatus, order, categoryId]
+      `UPDATE category 
+       SET name = $1, description = $2, price = $3, status = $4, plan_type = $5, bundle_price = $6, subscription_plan_id = $7,
+           annual_subscription = $8, bundled_access = $9, future_topics_included = $10, flexible_purchase = $11, priority = $12,
+           updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $13 RETURNING *`, 
+      [name.trim(), description.trim(), price, categoryStatus, plan_type, normalizedBundlePrice, subscription_plan_id,
+        !!annual_subscription, !!bundled_access, !!future_topics_included, !!flexible_purchase, priority || 0, categoryId]
     );
 
     // Format the response data
@@ -387,7 +471,15 @@ router.put('/categories/:id', async (req, res) => {
       id: result.rows[0].id,
       name: result.rows[0].name,
       description: result.rows[0].description,
+      subscription_plan_id: result.rows[0].subscription_plan_id,
+      plan_type: result.rows[0].plan_type,
+      bundle_price: result.rows[0].bundle_price,
       price: result.rows[0].price,
+      priority: result.rows[0].priority,
+      annual_subscription: !!result.rows[0].annual_subscription,
+      bundled_access: !!result.rows[0].bundled_access,
+      future_topics_included: !!result.rows[0].future_topics_included,
+      flexible_purchase: !!result.rows[0].flexible_purchase,
       topicsCount: result.rows[0].topics_count || 0,
       status: result.rows[0].status,
       displayOrder: result.rows[0].display_order,

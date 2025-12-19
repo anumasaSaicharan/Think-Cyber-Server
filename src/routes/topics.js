@@ -821,15 +821,11 @@ router.get('/topics/:id', async (req, res) => {
         c.name as category_name,
         c.name as category_slug,
         sc.name as subcategory_name,
-        sc.name as subcategory_slug,
-        AVG(tr.rating) as rating,
-        COUNT(tr.id) as review_count
+        sc.name as subcategory_slug
       FROM topics t
       LEFT JOIN category c ON t.category_id = c.id
       LEFT JOIN subcategory sc ON t.subcategory_id = sc.id
-      LEFT JOIN topic_reviews tr ON t.id = tr.topic_id
       WHERE t.id = $1
-      GROUP BY t.id, c.name, sc.name
     `, [id]);
 
     if (result.rows.length === 0) {

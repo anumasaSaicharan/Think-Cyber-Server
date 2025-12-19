@@ -189,6 +189,7 @@ const uploadS3Routes = require('./routes/upload-s3');
 const contactRoutes = require('./routes/contact');
 const authRouter = require('./routes/auth');
 const enrollmentRoutes = require('./routes/enrollment');
+const subscriptionPlansRoutes = require('./routes/subscriptionPlans');
 
 // settings
 app.set('port', process.env.PORT || 8081);
@@ -233,7 +234,7 @@ app.use('/api', topicsModulesRoutes);
 app.use('/api', topicsVideosRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/upload-s3', uploadS3Routes);
-app.use('/api', contactRoutes);
+app.use('/api/features-plans', subscriptionPlansRoutes);
 
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/auth', authRouter);

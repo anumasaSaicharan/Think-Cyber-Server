@@ -139,13 +139,6 @@ router.get('/dashboard/overview', async (req, res) => {
       WHERE payment_status IS NOT NULL
     `;
 
-    // Get average rating
-    const averageRatingQuery = `
-      SELECT COALESCE(AVG(rating), 0) as average_rating
-      FROM topic_reviews
-      WHERE is_approved = true
-    `;
-
     // Execute all queries in parallel
     const [
       usersResult,
@@ -156,8 +149,7 @@ router.get('/dashboard/overview', async (req, res) => {
       enrollmentsThisMonthResult,
       userGrowthResult,
       enrollmentGrowthResult,
-      completionRateResult,
-      averageRatingResult
+      completionRateResult
     ] = await Promise.all([
       req.pool.query(usersQuery),
       req.pool.query(topicsQuery),
@@ -167,8 +159,7 @@ router.get('/dashboard/overview', async (req, res) => {
       req.pool.query(enrollmentsThisMonthQuery),
       req.pool.query(userGrowthQuery),
       req.pool.query(enrollmentGrowthQuery),
-      req.pool.query(completionRateQuery),
-      req.pool.query(averageRatingQuery)
+      req.pool.query(completionRateQuery)
     ]);
 
     // Parse results

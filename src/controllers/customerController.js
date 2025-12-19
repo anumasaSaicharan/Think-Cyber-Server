@@ -170,7 +170,7 @@ controller.updateUser = async (req, res) => {
 // CATEGORY CRUD
 controller.listCategories = async (req, res) => {
     try {
-        const result = await req.pool.query('SELECT * FROM category');
+        const result = await req.pool.query('SELECT * FROM category ORDER BY priority ASC');
         res.status(200).json({ success: true, data: result.rows });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });

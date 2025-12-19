@@ -9,9 +9,6 @@ const pool = new Pool({
   password: process.env.PGPASSWORD,
   database: process.env.PGDATABASE,
   port: process.env.PGPORT,
-  ssl: {
-    rejectUnauthorized: false
-  }
 });
 
 async function runLegalDocumentsMigration() {
