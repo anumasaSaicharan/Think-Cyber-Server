@@ -190,6 +190,7 @@ const contactRoutes = require('./routes/contact');
 const authRouter = require('./routes/auth');
 const enrollmentRoutes = require('./routes/enrollment');
 const subscriptionPlansRoutes = require('./routes/subscriptionPlans');
+const analyticsUsersRoutes = require('./routes/analytics_users');
 
 // settings
 app.set('port', process.env.PORT || 8081);
@@ -228,6 +229,7 @@ app.use('/api', subcategoryRoutes);
 app.use('/api', termsConditionsRoutes);
 app.use('/api', privacyPoliciesRoutes);
 app.use('/api', homepageRoutes);
+app.use('/api', analyticsUsersRoutes);
 app.use('/api', topicsRoutes);
 app.use('/api', topicsActionsRoutes);
 app.use('/api', topicsModulesRoutes);

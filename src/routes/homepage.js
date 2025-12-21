@@ -139,6 +139,13 @@ router.get('/dashboard/overview', async (req, res) => {
       WHERE payment_status IS NOT NULL
     `;
 
+    // Get average rating
+    const averageRatingQuery = `
+      SELECT COALESCE(AVG(rating), 0) as average_rating
+      FROM topic_reviews
+      WHERE is_approved = true
+    `;
+
     // Execute all queries in parallel
     const [
       usersResult,
@@ -149,7 +156,8 @@ router.get('/dashboard/overview', async (req, res) => {
       enrollmentsThisMonthResult,
       userGrowthResult,
       enrollmentGrowthResult,
-      completionRateResult
+      completionRateResult,
+      averageRatingResult
     ] = await Promise.all([
       req.pool.query(usersQuery),
       req.pool.query(topicsQuery),
@@ -159,7 +167,8 @@ router.get('/dashboard/overview', async (req, res) => {
       req.pool.query(enrollmentsThisMonthQuery),
       req.pool.query(userGrowthQuery),
       req.pool.query(enrollmentGrowthQuery),
-      req.pool.query(completionRateQuery)
+      req.pool.query(completionRateQuery),
+      req.pool.query(averageRatingQuery)
     ]);
 
     // Parse results
@@ -201,7 +210,7 @@ router.get('/dashboard/overview', async (req, res) => {
     const completionRateData = completionRateResult.rows[0];
     const totalEnrollmentsForRate = parseInt(completionRateData?.total || 0);
     const completedEnrollments = parseInt(completionRateData?.completed || 0);
-    const completionRate = totalEnrollmentsForRate > 0 
+    const completionRate = totalEnrollmentsForRate > 0
       ? `${((completedEnrollments / totalEnrollmentsForRate) * 100).toFixed(1)}%`
       : "0.0%";
 
@@ -366,10 +375,10 @@ router.get('/dashboard/overview', async (req, res) => {
 // GET /api/dashboard/updates - Get user enrollments and subscriptions with filters
 router.get('/dashboard/updates', async (req, res) => {
   try {
-    const { 
-      tab = 'enrolled', 
-      month, 
-      fromDate, 
+    const {
+      tab = 'enrolled',
+      month,
+      fromDate,
       toDate,
       page = 1,
       limit = 20
@@ -408,7 +417,7 @@ router.get('/dashboard/updates', async (req, res) => {
       paramCount += 1;
     }
 
-    const whereClause = whereConditions.length > 0 
+    const whereClause = whereConditions.length > 0
       ? `WHERE ${whereConditions.join(' AND ')}`
       : '';
 
@@ -490,7 +499,7 @@ router.get('/dashboard/updates', async (req, res) => {
 
     const formattedData = result.rows.map(row => {
       const subscriptionInfo = calculateSubscriptionValidity(row.enrolled_at, row.payment_status);
-      
+
       return {
         id: row.id,
         userId: row.user_id,
@@ -599,7 +608,7 @@ router.get('/dashboard/updates', async (req, res) => {
 router.get('/dashboard/earnings', async (req, res) => {
   try {
     const currentYear = new Date().getFullYear();
-    const { 
+    const {
       year = currentYear,
       months = 12
     } = req.query;
@@ -724,7 +733,7 @@ router.get('/dashboard/earnings', async (req, res) => {
 router.get('/dashboard/reports/monthly', async (req, res) => {
   try {
     const currentYear = new Date().getFullYear();
-    const { 
+    const {
       year = currentYear,
       months = 12
     } = req.query;
@@ -786,7 +795,7 @@ router.get('/dashboard/reports/monthly', async (req, res) => {
 
     for (let i = 0; i < numMonths; i++) {
       const currentData = dataMap[i] || { users: 0, enrollments: 0, revenue: 0 };
-      
+
       // Calculate growth percentage compared to previous month
       let growth = "+0.0%";
       if (i > 0 && previousMonthEnrollments > 0) {
@@ -1399,7 +1408,7 @@ router.get('/homepage/:language', async (req, res) => {
     }
 
     const row = homepageResult.rows[0];
-    
+
     const homepageData = {
       id: `homepage_${language}_${row.id.toString().padStart(3, '0')}`,
       language: row.language,
@@ -1613,7 +1622,7 @@ router.post('/homepage/content', async (req, res) => {
 
     // Validation
     const validationErrors = [];
-    
+
     if (!language || language.trim() === '') {
       validationErrors.push({
         field: 'language',
@@ -1700,7 +1709,7 @@ router.post('/homepage/content', async (req, res) => {
       if (existingHomepage.rows.length > 0) {
         homepageId = existingHomepage.rows[0].id;
         isUpdate = true;
-        
+
         // Update homepage version
         await client.query(
           'UPDATE homepage SET version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1',
@@ -1786,7 +1795,7 @@ router.post('/homepage/content', async (req, res) => {
       if (faqs && Array.isArray(faqs)) {
         // Delete existing FAQs for this homepage
         await client.query('DELETE FROM homepage_faqs WHERE homepage_id = $1', [homepageId]);
-        
+
         // Insert new FAQs
         for (let i = 0; i < faqs.length; i++) {
           const faq = faqs[i];
@@ -1866,7 +1875,7 @@ router.post('/homepage/content', async (req, res) => {
       `, [homepageId]);
 
       const row = updatedHomepage.rows[0];
-      
+
       const responseData = {
         id: `homepage_${language}_${row.id.toString().padStart(3, '0')}`,
         language: row.language,
@@ -2022,7 +2031,7 @@ router.post('/homepage/faqs', async (req, res) => {
     }
 
     const homepageId = homepageResult.rows[0].id;
-    
+
     // Get next order if not provided
     let faqOrder = order;
     if (!faqOrder) {
