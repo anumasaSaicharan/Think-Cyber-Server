@@ -304,7 +304,16 @@ router.post('/verify-signup-otp', async (req, res) => {
  * /api/auth/logout:
  *   post:
  *     tags: [Auth]
- *     summary: Log out user (JWT client-side only)
+ *     summary: Log out user and remove FCM token
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               fcmToken:
+ *                 type: string
+ *                 description: FCM token to remove for this device
  *     responses:
  *       200:
  *         description: Logged out
@@ -320,7 +329,19 @@ router.post('/verify-signup-otp', async (req, res) => {
  */
 
 // POST /auth/logout
-router.post('/logout', (req, res) => {
+router.post('/logout', async (req, res) => {
+  const { fcmToken } = req.body;
+  
+  // Remove FCM token if provided (for push notifications)
+  if (fcmToken) {
+    try {
+      await pool.query('DELETE FROM user_fcm_tokens WHERE fcm_token = $1', [fcmToken]);
+    } catch (fcmErr) {
+      console.error('Error removing FCM token on logout:', fcmErr);
+      // Don't fail logout if FCM removal fails
+    }
+  }
+  
   // For JWT, logout is client-side (delete token).
   // For server-side sessions, destroy session here.
   res.json({ success: true, message: 'Logged out. Please delete your token on client.' });
@@ -410,6 +431,23 @@ router.post('/logout', (req, res) => {
  *               otp:
  *                 type: string
  *                 example: '123456'
+ *               fcmToken:
+ *                 type: string
+ *                 description: Firebase Cloud Messaging token for push notifications
+ *                 example: 'fMZvQVn5RJa...'
+ *               deviceId:
+ *                 type: string
+ *                 description: Unique device identifier
+ *                 example: 'abc123-device-id'
+ *               deviceType:
+ *                 type: string
+ *                 enum: [android, ios, web]
+ *                 description: Type of device
+ *                 example: 'android'
+ *               deviceName:
+ *                 type: string
+ *                 description: Human-readable device name
+ *                 example: 'Samsung Galaxy S21'
  *     responses:
  *       200:
  *         description: User verified and session token issued
@@ -528,7 +566,7 @@ router.post('/send-otp', async (req, res) => {
 
 // POST /auth/verify-otp
 router.post('/verify-otp', async (req, res) => {
-  const { email, otp } = req.body;
+  const { email, otp, fcmToken, deviceId, deviceType, deviceName } = req.body;
   if (!email || !otp) {
     return res.status(400).json({ success: false, error: 'Email and OTP required' });
   }
@@ -557,6 +595,27 @@ router.post('/verify-otp', async (req, res) => {
     const sessionToken = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     // Delete OTP after use
     await pool.query('DELETE FROM otp_verifications WHERE id = $1', [otpRes.rows[0].id]);
+
+    // Register FCM token if provided (for push notifications)
+    if (fcmToken) {
+      try {
+        await pool.query(
+          `INSERT INTO user_fcm_tokens (user_id, fcm_token, device_id, device_type, device_name, is_active, updated_at)
+           VALUES ($1, $2, $3, $4, $5, true, CURRENT_TIMESTAMP)
+           ON CONFLICT (user_id, fcm_token)
+           DO UPDATE SET 
+             device_id = EXCLUDED.device_id,
+             device_type = EXCLUDED.device_type,
+             device_name = EXCLUDED.device_name,
+             is_active = true,
+             updated_at = CURRENT_TIMESTAMP`,
+          [user.id, fcmToken, deviceId || null, deviceType || null, deviceName || null]
+        );
+      } catch (fcmErr) {
+        console.error('Error registering FCM token on login:', fcmErr);
+        // Don't fail login if FCM registration fails
+      }
+    }
       
     res.cookie('sessionToken', sessionToken, {
       httpOnly: true,

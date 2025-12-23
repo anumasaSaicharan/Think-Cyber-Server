@@ -190,6 +190,12 @@ const contactRoutes = require('./routes/contact');
 const authRouter = require('./routes/auth');
 const enrollmentRoutes = require('./routes/enrollment');
 const subscriptionPlansRoutes = require('./routes/subscriptionPlans');
+const notificationsRoutes = require('./routes/notifications');
+const appSettingsRoutes = require('./routes/appSettings');
+
+// Initialize Firebase Admin SDK
+const { initializeFirebase } = require('./config/firebase');
+initializeFirebase();
 
 // settings
 app.set('port', process.env.PORT || 8081);
@@ -238,6 +244,8 @@ app.use('/api/features-plans', subscriptionPlansRoutes);
 
 app.use('/api/enrollments', enrollmentRoutes);
 app.use('/api/auth', authRouter);
+app.use('/api/notifications', notificationsRoutes);
+app.use('/api/app-settings', appSettingsRoutes);
 
 // Serve uploaded files statically
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
