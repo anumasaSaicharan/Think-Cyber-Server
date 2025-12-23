@@ -257,12 +257,12 @@ router.get('/subcategories', async (req, res) => {
       LEFT JOIN category c ON s.category_id = c.id
       ${whereClause}
        ORDER BY
-      CASE 
+       CASE 
         WHEN s.display_order = 0 THEN 1 
         ELSE 0 
-      END,
-      s.display_order ASC, s.${sortField} ${sortOrder} 
-      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+       END,
+       s.display_order ASC, s.${sortField} ${sortOrder} 
+       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
 
     // Add pagination parameters
@@ -316,7 +316,10 @@ router.get('/subcategories', async (req, res) => {
       categoryId: row.category_id,
       categoryName: row.category_name,
       topicsCount: row.topics_count || 0,
+      topicsCount: row.topics_count || 0,
       status: row.status || 'Active',
+      priority: row.display_order || 0,
+      displayOrder: row.display_order || 0,
       createdAt: row.created_at ? row.created_at.toISOString().split('T')[0] : null,
       updatedAt: row.updated_at ? row.updated_at.toISOString().split('T')[0] : null
     }));
@@ -358,7 +361,7 @@ router.get('/subcategories', async (req, res) => {
 
 // POST subcategory
 router.post('/subcategories', async (req, res) => {
-  const { name, category_id, categoryId, description, status, displayOrder } = req.body;
+  const { name, category_id, categoryId, description, status, displayOrder, priority } = req.body;
 
   if (!name || name.trim() === '') {
     return res.status(400).json({
@@ -367,10 +370,13 @@ router.post('/subcategories', async (req, res) => {
     });
   }
 
-  const finalDisplayOrder =
-  displayOrder !== undefined && displayOrder !== null
-    ? parseInt(displayOrder, 10)
-    : 0;
+  // Priority and displayOrder logic
+  let finalPriority = 0;
+  if (priority !== undefined && priority !== null) {
+    finalPriority = parseInt(priority, 10);
+  } else if (displayOrder !== undefined && displayOrder !== null) {
+    finalPriority = parseInt(displayOrder, 10);
+  }
 
 
   // Accept both category_id and categoryId formats
@@ -403,7 +409,7 @@ router.post('/subcategories', async (req, res) => {
 
     const result = await req.pool.query(
       'INSERT INTO subcategory (name, category_id, description, status, topics_count, display_order) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-      [name.trim(), finalCategoryId, subcategoryDescription, subcategoryStatus, 0, finalDisplayOrder]
+      [name.trim(), finalCategoryId, subcategoryDescription, subcategoryStatus, 0, finalPriority]
     );
 
     if (!result || !result.rows || result.rows.length === 0) {
@@ -419,6 +425,10 @@ router.post('/subcategories', async (req, res) => {
       categoryName: categoryCheck.rows[0].name,
       topicsCount: result.rows[0].topics_count || 0,
       status: result.rows[0].status,
+      topicsCount: result.rows[0].topics_count || 0,
+      status: result.rows[0].status,
+      priority: result.rows[0].display_order,
+      displayOrder: result.rows[0].display_order,
       createdAt: result.rows[0].created_at ? result.rows[0].created_at.toISOString().split('T')[0] : null,
       updatedAt: result.rows[0].updated_at ? result.rows[0].updated_at.toISOString().split('T')[0] : null
     };
@@ -482,6 +492,9 @@ router.get('/subcategories/:id', async (req, res) => {
       categoryName: row.category_name,
       topicsCount: row.topics_count || 0,
       status: row.status || 'Active',
+      topicsCount: row.topics_count || 0,
+      status: row.status || 'Active',
+      priority: row.display_order,
       displayOrder: row.display_order,
       createdAt: row.created_at ? row.created_at.toISOString().split('T')[0] : null,
       updatedAt: row.updated_at ? row.updated_at.toISOString().split('T')[0] : null
@@ -503,7 +516,7 @@ router.get('/subcategories/:id', async (req, res) => {
 // PUT update subcategory by ID
 router.put('/subcategories/:id', async (req, res) => {
   const subcategoryId = parseInt(req.params.id);
-  const { name, category_id, categoryId, description, status, displayOrder } = req.body;
+  const { name, category_id, categoryId, description, status, displayOrder, priority } = req.body;
 
   if (!subcategoryId || isNaN(subcategoryId)) {
     return res.status(400).json({
@@ -560,12 +573,18 @@ router.put('/subcategories/:id', async (req, res) => {
       });
     }
 
-    const order = displayOrder !== undefined && displayOrder !== null ? parseInt(displayOrder) : 0;
+    // Priority and displayOrder logic
+    let finalPriority = 0;
+    if (priority !== undefined && priority !== null) {
+      finalPriority = parseInt(priority, 10);
+    } else if (displayOrder !== undefined && displayOrder !== null) {
+      finalPriority = parseInt(displayOrder, 10);
+    }
 
     // Update the subcategory
     const result = await req.pool.query(
       'UPDATE subcategory SET name = $1, category_id = $2, description = $3, status = $4, display_order = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
-      [name.trim(), finalCategoryId, subcategoryDescription, subcategoryStatus, order, subcategoryId]
+      [name.trim(), finalCategoryId, subcategoryDescription, subcategoryStatus, finalPriority, subcategoryId]
     );
 
     if (!result || !result.rows || result.rows.length === 0) {
@@ -580,7 +599,11 @@ router.put('/subcategories/:id', async (req, res) => {
       categoryId: result.rows[0].category_id,
       categoryName: categoryCheck.rows[0].name,
       topicsCount: result.rows[0].topics_count || 0,
+      topicsCount: result.rows[0].topics_count || 0,
       status: result.rows[0].status,
+      topicsCount: result.rows[0].topics_count || 0,
+      status: result.rows[0].status,
+      priority: result.rows[0].display_order,
       displayOrder: result.rows[0].display_order,
       createdAt: result.rows[0].created_at ? result.rows[0].created_at.toISOString().split('T')[0] : null,
       updatedAt: result.rows[0].updated_at ? result.rows[0].updated_at.toISOString().split('T')[0] : null

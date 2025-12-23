@@ -168,7 +168,7 @@ router.get('/categories', async (req, res) => {
     // Validate sortBy field to prevent SQL injection
     const allowedSortFields = ['id', 'name', 'description', 'price', 'bundle_price', 'plan_type', 'status', 'topicsCount', 'topics_count', 'createdAt', 'created_at', 'updatedAt', 'updated_at', 'priority'];
     let sortField = allowedSortFields.includes(sortBy) ? sortBy : 'priority';
-    
+
     // Map camelCase to snake_case for database columns
     if (sortField === 'createdAt') {
       sortField = 'created_at';
@@ -197,6 +197,7 @@ router.get('/categories', async (req, res) => {
         topics_count,
         status,
         priority,
+        display_order,
         created_at,
         updated_at
       FROM category 
@@ -235,6 +236,7 @@ router.get('/categories', async (req, res) => {
       topicsCount: row.topics_count,
       status: row.status,
       priority: row.priority,
+      display_order: row.display_order,
       createdAt: row.created_at ? row.created_at.toISOString().split('T')[0] : null,
       updatedAt: row.updated_at ? row.updated_at.toISOString().split('T')[0] : null
     }));
@@ -267,7 +269,7 @@ router.post('/categories', async (req, res) => {
     bundled_access = false,
     future_topics_included = false,
     flexible_purchase = false } = req.body;
-  
+
   if (!name || name.trim() === '') {
     return res.status(400).json({
       success: false,
@@ -312,12 +314,12 @@ router.post('/categories', async (req, res) => {
 
   try {
     const result = await req.pool.query(
-      `INSERT INTO category (name, description, price, status, plan_type, bundle_price, subscription_plan_id, priority,
+      `INSERT INTO category (name, description, price, status, plan_type, bundle_price, subscription_plan_id, priority, display_order,
         annual_subscription, bundled_access, future_topics_included, flexible_purchase)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       RETURNING *`, 
-      [name.trim(), description.trim(), price, categoryStatus, plan_type, normalizedBundlePrice, subscription_plan_id, priority,
-        !!annual_subscription, !!bundled_access, !!future_topics_included, !!flexible_purchase]
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12)
+       RETURNING *`,
+      [name.trim(), description.trim(), price, categoryStatus, plan_type, normalizedBundlePrice, subscription_plan_id, priority || 0,
+      !!annual_subscription, !!bundled_access, !!future_topics_included, !!flexible_purchase]
     );
 
     // Format the response data
@@ -361,8 +363,12 @@ router.put('/categories/:id', async (req, res) => {
     annual_subscription = false,
     bundled_access = false,
     future_topics_included = false,
-    flexible_purchase = false } = req.body;
-  
+    flexible_purchase = false,
+    display_order } = req.body;
+
+  // Map display_order to displayOrder for internal use if needed, or just use display_order
+  const displayOrder = display_order;
+
   if (!categoryId || isNaN(categoryId)) {
     return res.status(400).json({
       success: false,
@@ -426,44 +432,25 @@ router.put('/categories/:id', async (req, res) => {
       });
     }
 
-    // Default display order to 0 if not provided (though for update we might want to keep existing if not provided... but user asked "if no entry is given... by default 0")
-    // Use coalesce in query or check existing. Actually usually PUT updates provided fields. 
-    // But if we want to ensure it has a valid integer even if they send null.
-    // Let's assume if they don't send it, we keep it (or update if provided).
-    // The user said "if no entry is given in display order field then by default 0". This applies more to creation. 
-    // For update, if they send it, update it.
-
-    // However, to be safe with the "default 0" logic on update:
-    const order = displayOrder !== undefined && displayOrder !== null ? parseInt(displayOrder) : 0;
+    // Validating and syncing priority and display_order
+    let finalPriority = 0;
+    if (priority !== undefined && priority !== null) {
+      finalPriority = parseInt(priority);
+    } else if (display_order !== undefined && display_order !== null) {
+      finalPriority = parseInt(display_order);
+    }
+    // Else default to 0
 
     // Update the category
-    // NOTE: This OVERWRITES display_order to 0 if not provided in PUT. 
-    // Ideally patch is better, but this is PUT. 
-    // IF the user wants PUT to be a full update, then missing fields might be reset. 
-    // But usually we just update what is there or keep existing.
-    // Let's assume standard PUT behavior but ensuring '0' if they explicitly send null or empty.
-    // Actually, looking at the code, it updates everything. So if I don't fetch existing display_order, I might overwrite it.
-    // BUT the SQL query uses specific values. 
-
-    // Let's use COALESCE in SQL ideally, or just fetch existing first?
-    // The existing code doesn't Partial Update. It updates ALL fields: name=$1, description=$2...
-    // So I must provide a value for display_order. 
-    // If the client doesn't send it, it will be set to 0 with my logic above.
-
-    // Let's check if we want to preserve existing if partial. 
-    // The query is: `UPDATE category SET name = $1...`
-    // It seems to expect all fields.
-    // I see the previous code didn't do partial updates. It required name, description etc.
-    // So I will require them to send it or default to 0.
-
     const result = await req.pool.query(
       `UPDATE category 
        SET name = $1, description = $2, price = $3, status = $4, plan_type = $5, bundle_price = $6, subscription_plan_id = $7,
            annual_subscription = $8, bundled_access = $9, future_topics_included = $10, flexible_purchase = $11, priority = $12,
+           display_order = $13,
            updated_at = CURRENT_TIMESTAMP 
-       WHERE id = $13 RETURNING *`, 
+       WHERE id = $14 RETURNING *`,
       [name.trim(), description.trim(), price, categoryStatus, plan_type, normalizedBundlePrice, subscription_plan_id,
-        !!annual_subscription, !!bundled_access, !!future_topics_included, !!flexible_purchase, priority || 0, categoryId]
+      !!annual_subscription, !!bundled_access, !!future_topics_included, !!flexible_purchase, finalPriority, finalPriority, categoryId]
     );
 
     // Format the response data
