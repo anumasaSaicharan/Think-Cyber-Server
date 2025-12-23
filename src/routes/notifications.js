@@ -704,4 +704,203 @@ router.get('/stats', verifyToken, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/notifications/history/{userId}:
+ *   get:
+ *     tags: [Notifications]
+ *     summary: Get notification history for a specific user
+ *     description: Retrieves all notifications sent to a user including broadcasts
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: The user ID
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *         description: Maximum number of notifications to return
+ *       - in: query
+ *         name: offset
+ *         schema:
+ *           type: integer
+ *           default: 0
+ *         description: Number of notifications to skip
+ *       - in: query
+ *         name: unreadOnly
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: Return only unread notifications
+ *     responses:
+ *       200:
+ *         description: User notification history
+ */
+router.get('/history/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
+    const unreadOnly = req.query.unreadOnly === 'true';
+    const filterType = req.query.filterType; // 'broadcast', 'personal', or null for all
+
+    // Get notifications for this user (personal + broadcasts)
+    let query = `
+      SELECT 
+        id,
+        user_id,
+        title,
+        body as message,
+        COALESCE(data->>'type', 'info') as type,
+        COALESCE((data->>'isRead')::boolean, false) as "isRead",
+        created_at as "createdAt",
+        CASE 
+          WHEN status = 'broadcast' THEN 'campaign'
+          WHEN COALESCE(data->>'type', '') = 'success' THEN 'check_circle'
+          WHEN COALESCE(data->>'type', '') = 'error' THEN 'error'
+          WHEN COALESCE(data->>'type', '') = 'warning' THEN 'warning'
+          ELSE 'notifications'
+        END as icon,
+        status,
+        CASE 
+          WHEN user_id IS NULL THEN 'broadcast'
+          ELSE 'personal'
+        END as "notificationType",
+        data
+      FROM notification_history
+      WHERE (user_id = $1 OR user_id IS NULL)
+    `;
+    
+    const params = [userId];
+    let paramIndex = 2;
+    
+    // Filter by notification type if specified
+    if (filterType === 'broadcast') {
+      query += ` AND user_id IS NULL`;
+    } else if (filterType === 'personal') {
+      query += ` AND user_id = $1`;
+    }
+    
+    if (unreadOnly) {
+      query += ` AND COALESCE((data->>'isRead')::boolean, false) = false`;
+    }
+    
+    query += ` ORDER BY created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(limit, offset);
+
+    const result = await pool.query(query, params);
+
+    // Get total count
+    let countQuery = `
+      SELECT COUNT(*) as total 
+      FROM notification_history 
+      WHERE (user_id = $1 OR user_id IS NULL)
+    `;
+    if (filterType === 'broadcast') {
+      countQuery += ` AND user_id IS NULL`;
+    } else if (filterType === 'personal') {
+      countQuery += ` AND user_id = $1`;
+    }
+    if (unreadOnly) {
+      countQuery += ` AND COALESCE((data->>'isRead')::boolean, false) = false`;
+    }
+    const countResult = await pool.query(countQuery, [userId]);
+
+    // Get unread count
+    const unreadResult = await pool.query(`
+      SELECT COUNT(*) as unread 
+      FROM notification_history 
+      WHERE (user_id = $1 OR user_id IS NULL) 
+      AND COALESCE((data->>'isRead')::boolean, false) = false
+    `, [userId]);
+
+    res.json({
+      success: true,
+      data: result.rows,
+      total: parseInt(countResult.rows[0].total),
+      unreadCount: parseInt(unreadResult.rows[0].unread),
+      limit,
+      offset
+    });
+  } catch (error) {
+    console.error('Error fetching user notification history:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch notification history' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/notifications/mark-read/{notificationId}:
+ *   put:
+ *     tags: [Notifications]
+ *     summary: Mark a notification as read
+ *     parameters:
+ *       - in: path
+ *         name: notificationId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Notification marked as read
+ */
+router.put('/mark-read/:notificationId', async (req, res) => {
+  try {
+    const { notificationId } = req.params;
+
+    await pool.query(`
+      UPDATE notification_history 
+      SET data = COALESCE(data, '{}'::jsonb) || '{"isRead": true}'::jsonb
+      WHERE id = $1
+    `, [notificationId]);
+
+    res.json({ success: true, message: 'Notification marked as read' });
+  } catch (error) {
+    console.error('Error marking notification as read:', error);
+    res.status(500).json({ success: false, error: 'Failed to mark notification as read' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/notifications/mark-all-read/{userId}:
+ *   put:
+ *     tags: [Notifications]
+ *     summary: Mark all notifications as read for a user
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: All notifications marked as read
+ */
+router.put('/mark-all-read/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const result = await pool.query(`
+      UPDATE notification_history 
+      SET data = COALESCE(data, '{}'::jsonb) || '{"isRead": true}'::jsonb
+      WHERE (user_id = $1 OR user_id IS NULL)
+      AND COALESCE((data->>'isRead')::boolean, false) = false
+    `, [userId]);
+
+    res.json({ 
+      success: true, 
+      message: 'All notifications marked as read',
+      updatedCount: result.rowCount
+    });
+  } catch (error) {
+    console.error('Error marking all notifications as read:', error);
+    res.status(500).json({ success: false, error: 'Failed to mark notifications as read' });
+  }
+});
+
 module.exports = router;

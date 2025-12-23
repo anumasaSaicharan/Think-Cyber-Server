@@ -6,6 +6,13 @@ const pool = new Pool();
 const jwt = require('jsonwebtoken');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const admin = require('firebase-admin');
+const { 
+  sendEnrollmentNotification, 
+  sendBundlePurchaseNotification, 
+  sendPaymentSuccessNotification,
+  sendPaymentFailedNotification 
+} = require('../config/notificationTriggers');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
 
@@ -14,6 +21,118 @@ const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
+
+// Helper function to send direct Firebase notification
+const sendDirectFirebaseNotification = async (userId, title, body, data = {}) => {
+  try {
+    // Get user's FCM tokens
+    const tokensResult = await pool.query(
+      'SELECT id, fcm_token FROM user_fcm_tokens WHERE user_id = $1 AND is_active = true',
+      [userId]
+    );
+
+    if (tokensResult.rows.length === 0) {
+      console.log(`⚠️  No active FCM tokens for user ${userId}`);
+      return { success: false, message: 'No active devices' };
+    }
+
+    const messaging = admin.messaging();
+    const tokenRecords = tokensResult.rows;
+    const tokens = tokenRecords.map(row => row.fcm_token);
+
+    console.log(`📤 Sending Firebase notification to user ${userId} (${tokens.length} device(s))`);
+    console.log(`   Title: ${title}`);
+    console.log(`   Body: ${body}`);
+
+    // Send to all user's devices
+    const message = {
+      notification: {
+        title: title,
+        body: body,
+      },
+      data: {
+        ...Object.entries(data).reduce((acc, [key, value]) => {
+          acc[key] = String(value);
+          return acc;
+        }, {})
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          sound: 'default',
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1,
+          },
+        },
+      },
+    };
+
+    if (tokens.length === 1) {
+      try {
+        const response = await messaging.send({
+          token: tokens[0],
+          ...message
+        });
+        console.log(`✅ Firebase notification sent to user ${userId}: ${response}`);
+        return { success: true, messageId: response };
+      } catch (error) {
+        // If single token fails, mark it as inactive
+        if (error.code === 'messaging/invalid-registration-token' || 
+            error.code === 'messaging/registration-token-not-registered') {
+          console.warn(`⚠️  Invalid token for user ${userId}, marking as inactive`);
+          await pool.query(
+            'UPDATE user_fcm_tokens SET is_active = false WHERE user_id = $1',
+            [userId]
+          );
+        }
+        throw error;
+      }
+    } else {
+      const response = await messaging.sendEachForMulticast({
+        tokens: tokens,
+        ...message
+      });
+      
+      console.log(`✅ Firebase notification sent to ${response.successCount} device(s) for user ${userId}`);
+      
+      if (response.failureCount > 0) {
+        console.warn(`⚠️  Failed to send to ${response.failureCount} device(s)`);
+        
+        // Mark invalid tokens as inactive
+        for (let i = 0; i < response.responses.length; i++) {
+          const resp = response.responses[i];
+          if (!resp.success) {
+            const error = resp.error;
+            if (error.code === 'messaging/invalid-registration-token' || 
+                error.code === 'messaging/registration-token-not-registered') {
+              const tokenId = tokenRecords[i].id;
+              console.log(`   Deactivating invalid token ID ${tokenId}`);
+              await pool.query(
+                'UPDATE user_fcm_tokens SET is_active = false WHERE id = $1',
+                [tokenId]
+              );
+            }
+          }
+        }
+      }
+      
+      return {
+        success: response.successCount > 0,
+        successCount: response.successCount,
+        failureCount: response.failureCount
+      };
+    }
+  } catch (error) {
+    console.error(`❌ Error sending Firebase notification to user ${userId}:`, error.message);
+    return { success: false, error: error.message };
+  }
+};
 
 
 /**
@@ -50,14 +169,30 @@ router.get('/user/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
     const result = await pool.query(`
-      SELECT ut.*, t.*
+      SELECT 
+        ut.id,
+        ut.topic_id,
+        ut.user_id,
+        ut.enrolled_at,
+        ut.payment_status,
+        ut.razorpay_payment_id,
+        ut.razorpay_order_id,
+        t.category_id,
+        c.name as category_name,
+        c.plan_type as category_plan_type,
+        t.created_at as topic_created_at,
+        t.title as topic_title,
+        t.thumbnail_url,
+        t.price,
+        t.is_free
       FROM user_topics ut
       JOIN topics t ON ut.topic_id = t.id
+      LEFT JOIN category c ON t.category_id = c.id
       WHERE ut.user_id = $1
     `, [user_id]);
-    res.json(result.rows);
+    res.json({ success: true, data: result.rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -283,8 +418,38 @@ router.post('/verify-payment', async (req, res) => {
         ['completed', userId, topicId]
       );
 
+      // Get topic title for notification
+      try {
+        const topicResult = await pool.query('SELECT title FROM topics WHERE id = $1', [topicId]);
+        const topicTitle = topicResult.rows[0]?.title || 'the course';
+        
+        // Send enrollment notification using trigger
+        await sendEnrollmentNotification(userId, topicTitle);
+        
+        // Also send direct Firebase notification immediately after DB save
+        await sendDirectFirebaseNotification(
+          userId,
+          'Enrollment Successful! ✅',
+          `You have successfully enrolled in '${topicTitle}'. Start learning now!`,
+          {
+            type: 'TOPIC_ENROLLED',
+            topicId: topicId.toString(),
+            topicTitle: topicTitle,
+          }
+        );
+      } catch (notifErr) {
+        console.error('Error sending enrollment notification:', notifErr);
+        // Don't fail the API response if notification fails
+      }
+
       res.json({ success: true, message: 'Payment verified and enrollment completed' });
     } else {
+      // Send payment failed notification
+      try {
+        await sendPaymentFailedNotification(userId);
+      } catch (notifErr) {
+        console.error('Error sending payment failed notification:', notifErr);
+      }
       res.status(400).json({ success: false, error: 'Invalid signature' });
     }
   } catch (err) {
@@ -374,6 +539,30 @@ router.post('/verify-bundle-payment', async (req, res) => {
         );
       }
 
+      // Get category name for notification
+      try {
+        const categoryNameResult = await pool.query('SELECT name FROM category WHERE id = $1', [categoryId]);
+        const categoryName = categoryNameResult.rows[0]?.name || 'the bundle';
+        
+        // Send bundle purchase notification using trigger
+        await sendBundlePurchaseNotification(userId, categoryName);
+        
+        // Also send direct Firebase notification immediately after DB save
+        await sendDirectFirebaseNotification(
+          userId,
+          'Bundle Unlocked! 🎁',
+          `You now have access to all topics in '${categoryName}'. Happy learning!`,
+          {
+            type: 'BUNDLE_PURCHASED',
+            categoryId: categoryId.toString(),
+            categoryName: categoryName,
+          }
+        );
+      } catch (notifErr) {
+        console.error('Error sending bundle purchase notification:', notifErr);
+        // Don't fail the API response if notification fails
+      }
+
       res.json({ 
         success: true, 
         message: 'Bundle payment verified and enrollment completed',
@@ -381,6 +570,12 @@ router.post('/verify-bundle-payment', async (req, res) => {
         futureTopicsIncluded: futureTopicsIncluded
       });
     } else {
+      // Send payment failed notification
+      try {
+        await sendPaymentFailedNotification(userId);
+      } catch (notifErr) {
+        console.error('Error sending payment failed notification:', notifErr);
+      }
       res.status(400).json({ success: false, error: 'Invalid signature' });
     }
   } catch (err) {

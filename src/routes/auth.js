@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const { Pool } = require('pg');
 const pool = new Pool();
+const { sendWelcomeNotification, sendAccountClosureNotification } = require('../config/notificationTriggers');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
 const JWT_EXPIRES_IN = '15m';
@@ -501,6 +502,31 @@ router.post('/send-otp', async (req, res) => {
       return res.status(400).json({ success: false, error: 'User not found. Please register first.' });
     }
     user = result.rows[0];
+    
+    // Check if account is deactivated/closed
+    if (user.is_active === false) {
+      // Get admin contact email from homepage_contact table
+      let adminEmail = 'support@thinkcyber.info'; // default
+      try {
+        const contactResult = await pool.query(
+          'SELECT email, support_email FROM homepage_contact LIMIT 1'
+        );
+        if (contactResult.rows.length > 0) {
+          adminEmail = contactResult.rows[0].support_email || contactResult.rows[0].email || adminEmail;
+        }
+      } catch (contactErr) {
+        console.error('Error fetching contact email:', contactErr);
+      }
+      
+      return res.status(403).json({ 
+        success: false, 
+        error: 'Account closed',
+        message: 'Your account closure request has been submitted and your account is now deactivated. You cannot login. Please contact the admin for assistance.',
+        adminEmail: adminEmail,
+        isAccountClosed: true
+      });
+    }
+    
     if (!user.is_verified) {
       return res.status(403).json({ success: false, error: 'Please verify your email to login' });
     }
@@ -560,13 +586,25 @@ router.post('/send-otp', async (req, res) => {
 
     res.status(200).json({ success: true, message: 'OTP sent' });
   } catch (err) {
-    res.status(500).json({ success: false, error: 'Email send failed' });
+    console.error('Send OTP email error:', err);
+    res.status(500).json({ success: false, error: 'Email send failed', details: err.message });
   }
 });
 
 // POST /auth/verify-otp
 router.post('/verify-otp', async (req, res) => {
   const { email, otp, fcmToken, deviceId, deviceType, deviceName } = req.body;
+  
+  // Debug logging for FCM token
+  console.log('verify-otp request body:', { 
+    email, 
+    otp: otp ? '***' : undefined, 
+    fcmToken: fcmToken ? `${fcmToken.substring(0, 20)}...` : 'NOT PROVIDED',
+    deviceId,
+    deviceType,
+    deviceName
+  });
+  
   if (!email || !otp) {
     return res.status(400).json({ success: false, error: 'Email and OTP required' });
   }
@@ -599,7 +637,8 @@ router.post('/verify-otp', async (req, res) => {
     // Register FCM token if provided (for push notifications)
     if (fcmToken) {
       try {
-        await pool.query(
+        console.log('Attempting to store FCM token for user:', user.id);
+        const fcmResult = await pool.query(
           `INSERT INTO user_fcm_tokens (user_id, fcm_token, device_id, device_type, device_name, is_active, updated_at)
            VALUES ($1, $2, $3, $4, $5, true, CURRENT_TIMESTAMP)
            ON CONFLICT (user_id, fcm_token)
@@ -608,9 +647,38 @@ router.post('/verify-otp', async (req, res) => {
              device_type = EXCLUDED.device_type,
              device_name = EXCLUDED.device_name,
              is_active = true,
-             updated_at = CURRENT_TIMESTAMP`,
+             updated_at = CURRENT_TIMESTAMP
+           RETURNING *`,
           [user.id, fcmToken, deviceId || null, deviceType || null, deviceName || null]
         );
+        console.log('FCM token stored successfully:', fcmResult.rows[0]?.id);
+        
+        // Send welcome notification on first-ever login only
+        try {
+          // Check if user has already received welcome notification
+          const welcomeCheckResult = await pool.query(
+            'SELECT has_received_welcome FROM users WHERE id = $1',
+            [user.id]
+          );
+          const hasReceivedWelcome = welcomeCheckResult.rows[0]?.has_received_welcome || false;
+          
+          if (!hasReceivedWelcome) {
+            // Send welcome notification
+            await sendWelcomeNotification(user.id, true);
+            
+            // Mark that welcome has been sent
+            await pool.query(
+              'UPDATE users SET has_received_welcome = true WHERE id = $1',
+              [user.id]
+            );
+            console.log(`Welcome notification sent and marked for user ${user.id}`);
+          } else {
+            console.log(`User ${user.id} already received welcome notification`);
+          }
+        } catch (notifErr) {
+          console.error('Error handling welcome notification:', notifErr);
+          // Don't fail login if notification fails
+        }
       } catch (fcmErr) {
         console.error('Error registering FCM token on login:', fcmErr);
         // Don't fail login if FCM registration fails
@@ -795,6 +863,273 @@ router.post('/resend-otp', async (req, res) => {
   } catch (err) {
     console.error('Resend OTP error:', err);
     res.status(500).json({ success: false, error: 'Failed to generate OTP' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/close-account:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Submit account closure request
+ *     description: Allows a user to request account closure/deactivation
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - reason
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Reason for closing the account
+ *                 example: "I no longer need this service"
+ *               user_id:
+ *                 type: integer
+ *                 description: User ID (optional if using auth token)
+ *                 example: 123
+ *     responses:
+ *       200:
+ *         description: Account closure request submitted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: "Account closure request submitted successfully"
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     request_id:
+ *                       type: string
+ *                       example: "CLO-2024-12345"
+ *                     status:
+ *                       type: string
+ *                       example: "pending"
+ *       400:
+ *         description: Bad request
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Server error
+ */
+router.post('/close-account', async (req, res) => {
+  try {
+    // Get user from token or request body
+    let userId = req.body.user_id;
+    
+    // If no user_id in body, try to get from auth token
+    if (!userId) {
+      const authHeader = req.headers['authorization'];
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split(' ')[1];
+        try {
+          const decoded = jwt.verify(token, JWT_SECRET);
+          userId = decoded.userId;
+        } catch (err) {
+          // Token invalid, continue without userId
+        }
+      }
+    }
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to submit request',
+        error: 'User ID is required'
+      });
+    }
+    
+    const { reason } = req.body;
+    
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to submit request',
+        error: 'Reason is required for account closure'
+      });
+    }
+    
+    // Check if user exists
+    const userCheck = await pool.query('SELECT id, email, is_active FROM users WHERE id = $1', [userId]);
+    if (!userCheck.rows.length) {
+      return res.status(404).json({
+        success: false,
+        message: 'Failed to submit request',
+        error: 'User not found'
+      });
+    }
+    
+    const user = userCheck.rows[0];
+    
+    // Check if user is already deactivated
+    if (user.is_active === false) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to submit request',
+        error: 'Account is already deactivated'
+      });
+    }
+    
+    // Check if there's already a pending request
+    const existingRequest = await pool.query(
+      'SELECT id, request_id, status FROM account_closure_requests WHERE user_id = $1 AND status = $2',
+      [userId, 'pending']
+    );
+    
+    if (existingRequest.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to submit request',
+        error: 'You already have a pending account closure request',
+        data: {
+          request_id: existingRequest.rows[0].request_id,
+          status: existingRequest.rows[0].status
+        }
+      });
+    }
+    
+    // Generate unique request ID
+    const year = new Date().getFullYear();
+    const randomNum = Math.floor(10000 + Math.random() * 90000);
+    const requestId = `CLO-${year}-${randomNum}`;
+    
+    // Insert closure request
+    const insertResult = await pool.query(
+      `INSERT INTO account_closure_requests (request_id, user_id, reason, status, created_at, updated_at)
+       VALUES ($1, $2, $3, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       RETURNING id, request_id, status, created_at`,
+      [requestId, userId, reason.trim()]
+    );
+    
+    const closureRequest = insertResult.rows[0];
+    
+    // Send account closure notification before deactivating FCM tokens
+    try {
+      await sendAccountClosureNotification(userId);
+    } catch (notifErr) {
+      console.error('Error sending account closure notification:', notifErr);
+    }
+    
+    // Immediately deactivate the account
+    await pool.query(
+      `UPDATE users SET is_active = false, deactivated_at = CURRENT_TIMESTAMP, deactivation_reason = $1 WHERE id = $2`,
+      [reason.trim(), userId]
+    );
+    
+    // Deactivate all FCM tokens for this user
+    await pool.query(
+      'UPDATE user_fcm_tokens SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE user_id = $1',
+      [userId]
+    );
+    
+    // Update closure request status to completed
+    await pool.query(
+      `UPDATE account_closure_requests SET status = 'completed', processed_at = CURRENT_TIMESTAMP WHERE id = $1`,
+      [closureRequest.id]
+    );
+    
+    console.log(`Account closure request submitted: ${requestId} for user ${userId}`);
+    
+    res.json({
+      success: true,
+      message: 'Account closure request submitted successfully',
+      data: {
+        request_id: closureRequest.request_id,
+        status: 'completed'
+      }
+    });
+    
+  } catch (err) {
+    console.error('Close account error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to submit request',
+      error: err.message || 'Internal server error'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/auth/close-account/status:
+ *   get:
+ *     tags: [Auth]
+ *     summary: Get account closure request status
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: user_id
+ *         schema:
+ *           type: integer
+ *         description: User ID (optional if using auth token)
+ *     responses:
+ *       200:
+ *         description: Account closure request status
+ */
+router.get('/close-account/status', async (req, res) => {
+  try {
+    let userId = req.query.user_id;
+    
+    // If no user_id in query, try to get from auth token
+    if (!userId) {
+      const authHeader = req.headers['authorization'];
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.split(' ')[1];
+        try {
+          const decoded = jwt.verify(token, JWT_SECRET);
+          userId = decoded.userId;
+        } catch (err) {
+          // Token invalid
+        }
+      }
+    }
+    
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'User ID is required'
+      });
+    }
+    
+    const result = await pool.query(
+      `SELECT request_id, status, reason, admin_notes, created_at, processed_at
+       FROM account_closure_requests 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 1`,
+      [userId]
+    );
+    
+    if (!result.rows.length) {
+      return res.json({
+        success: true,
+        data: null,
+        message: 'No account closure request found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: result.rows[0]
+    });
+    
+  } catch (err) {
+    console.error('Get closure status error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error'
+    });
   }
 });
 
