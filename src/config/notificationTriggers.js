@@ -42,18 +42,24 @@ const saveNotificationToHistory = async (userId, title, body, type, data = {}) =
  */
 const sendUserNotification = async (userId, notificationType, variables = {}, additionalData = {}) => {
   try {
+    console.log(`\n🔔 [NOTIFICATION TRIGGER] Starting for user ${userId}, type: ${notificationType}`);
+    
     const notification = getNotification(notificationType, variables);
     if (!notification) {
       console.error(`Invalid notification type: ${notificationType}`);
       return { success: false, error: 'Invalid notification type' };
     }
 
+    console.log(`📝 Notification template loaded: title="${notification.title}"`);
+
     const tokens = await getUserFcmTokens(userId);
+    console.log(`🔑 Found ${tokens.length} active FCM token(s) for user ${userId}`);
     
     if (tokens.length === 0) {
-      console.log(`No active FCM tokens for user ${userId}`);
+      console.log(`⚠️  No active FCM tokens for user ${userId}`);
       // Still save to history for in-app display
       await saveNotificationToHistory(userId, notification.title, notification.body, notification.type, additionalData);
+      console.log(`💾 Notification saved to history (no devices to send to)`);
       return { success: true, message: 'Notification saved (no active devices)' };
     }
 
@@ -62,26 +68,34 @@ const sendUserNotification = async (userId, notificationType, variables = {}, ad
       body: notification.body
     };
 
+    // Send actual notification type in data payload, not the styling type
     const dataPayload = {
-      type: notification.type,
+      notificationType: notificationType,    // BUNDLE_PURCHASED, TOPIC_ENROLLED, etc.
+      notificationStyle: notification.type,   // success, error, warning, info (for styling)
       icon: notification.icon,
       ...additionalData
     };
 
+    console.log(`📤 Payload: title="${notificationPayload.title}", body="${notificationPayload.body}"`);
+    console.log(`📊 Data payload:`, dataPayload);
+
     // Send to all user's devices
     if (tokens.length === 1) {
+      console.log(`📱 Sending to single device: ${tokens[0].substring(0, 30)}...`);
       await sendPushNotification(tokens[0], notificationPayload, dataPayload);
     } else {
+      console.log(`📱 Sending to ${tokens.length} devices via multicast`);
       await sendMulticastNotification(tokens, notificationPayload, dataPayload);
     }
 
     // Save to history
     await saveNotificationToHistory(userId, notification.title, notification.body, notification.type, additionalData);
+    console.log(`✅ Notification saved to history`);
 
-    console.log(`Notification sent to user ${userId}: ${notificationType}`);
+    console.log(`✅ [SUCCESS] Notification sent to user ${userId}: ${notificationType}\n`);
     return { success: true, message: 'Notification sent successfully' };
   } catch (error) {
-    console.error(`Error sending notification to user ${userId}:`, error);
+    console.error(`❌ [ERROR] Error sending notification to user ${userId}:`, error);
     return { success: false, error: error.message };
   }
 };

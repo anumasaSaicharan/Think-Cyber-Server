@@ -115,10 +115,12 @@ async function sendPushNotification(fcmToken, notification, data = {}) {
   };
 
   try {
+    console.log(`🚀 [Firebase] Sending notification to single token: ${fcmToken.substring(0, 30)}...`);
     const response = await messaging.send(message);
+    console.log(`✅ [Firebase] Single notification sent successfully, MessageID: ${response}`);
     return { success: true, messageId: response };
   } catch (error) {
-    console.error('Error sending push notification:', error);
+    console.error(`❌ [Firebase] Error sending push notification:`, error.code, error.message);
     throw error;
   }
 }
@@ -165,7 +167,9 @@ async function sendMulticastNotification(fcmTokens, notification, data = {}) {
   };
 
   try {
+    console.log(`🚀 [Firebase] Sending multicast notification to ${fcmTokens.length} tokens`);
     const response = await messaging.sendEachForMulticast(message);
+    console.log(`✅ [Firebase] Multicast sent: ${response.successCount} success, ${response.failureCount} failed`);
     return {
       success: true,
       successCount: response.successCount,
@@ -173,7 +177,7 @@ async function sendMulticastNotification(fcmTokens, notification, data = {}) {
       responses: response.responses,
     };
   } catch (error) {
-    console.error('Error sending multicast notification:', error);
+    console.error(`❌ [Firebase] Error sending multicast notification:`, error.code, error.message);
     throw error;
   }
 }

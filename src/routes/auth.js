@@ -610,6 +610,13 @@ router.post('/verify-otp', async (req, res) => {
   }
   // Find OTP for user in DB
   let user;
+  let notificationStatus = {
+    fcmTokenStored: false,
+    fcmTokenProvided: !!fcmToken,
+    welcomeNotificationSent: false,
+    notificationMessage: ''
+  };
+
   try {
     // Only allow login for registered and verified users
     const userRes = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
@@ -652,6 +659,7 @@ router.post('/verify-otp', async (req, res) => {
           [user.id, fcmToken, deviceId || null, deviceType || null, deviceName || null]
         );
         console.log('FCM token stored successfully:', fcmResult.rows[0]?.id);
+        notificationStatus.fcmTokenStored = true;
         
         // Send welcome notification on first-ever login only
         try {
@@ -672,17 +680,25 @@ router.post('/verify-otp', async (req, res) => {
               [user.id]
             );
             console.log(`Welcome notification sent and marked for user ${user.id}`);
+            notificationStatus.welcomeNotificationSent = true;
+            notificationStatus.notificationMessage = 'Welcome notification sent to your device';
           } else {
             console.log(`User ${user.id} already received welcome notification`);
+            notificationStatus.welcomeNotificationSent = false;
+            notificationStatus.notificationMessage = 'Welcome notification already sent previously';
           }
         } catch (notifErr) {
           console.error('Error handling welcome notification:', notifErr);
+          notificationStatus.notificationMessage = `Notification error: ${notifErr.message}`;
           // Don't fail login if notification fails
         }
       } catch (fcmErr) {
         console.error('Error registering FCM token on login:', fcmErr);
+        notificationStatus.notificationMessage = `FCM token storage error: ${fcmErr.message}`;
         // Don't fail login if FCM registration fails
       }
+    } else {
+      notificationStatus.notificationMessage = 'No FCM token provided - notifications disabled';
     }
       
     res.cookie('sessionToken', sessionToken, {
@@ -691,7 +707,12 @@ router.post('/verify-otp', async (req, res) => {
       sameSite: 'Strict', // or 'Lax'
       maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
-    res.json({ success: true, user, sessionToken }); // Do NOT send sessionToken in JSON
+    res.json({ 
+      success: true, 
+      user, 
+      sessionToken,
+      notification: notificationStatus  // Include notification status in response
+    });
 
   } catch (err) {
     res.status(500).json({ success: false, error: 'DB error' });

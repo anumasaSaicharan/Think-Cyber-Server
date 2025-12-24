@@ -432,7 +432,7 @@ router.post('/verify-payment', async (req, res) => {
           'Enrollment Successful! ✅',
           `You have successfully enrolled in '${topicTitle}'. Start learning now!`,
           {
-            type: 'TOPIC_ENROLLED',
+            notificationType: 'TOPIC_ENROLLED',
             topicId: topicId.toString(),
             topicTitle: topicTitle,
           }
@@ -553,7 +553,7 @@ router.post('/verify-bundle-payment', async (req, res) => {
           'Bundle Unlocked! 🎁',
           `You now have access to all topics in '${categoryName}'. Happy learning!`,
           {
-            type: 'BUNDLE_PURCHASED',
+            notificationType: 'BUNDLE_PURCHASED',
             categoryId: categoryId.toString(),
             categoryName: categoryName,
           }
@@ -689,6 +689,28 @@ router.post('/enroll', async (req, res) => {
         'INSERT INTO user_topics (user_id, topic_id, payment_status) VALUES ($1, $2, $3) ON CONFLICT (user_id, topic_id) DO UPDATE SET payment_status = $3',
         [userId, topicId, 'completed']
       );
+
+      // Send enrollment notification for free course
+      try {
+        console.log(`📧 Sending enrollment notification for free course: ${title}`);
+        await sendEnrollmentNotification(userId, title);
+        
+        // Also send direct Firebase notification
+        await sendDirectFirebaseNotification(
+          userId,
+          'Enrollment Successful! ✅',
+          `You have successfully enrolled in '${title}'. Start learning now!`,
+          {
+            notificationType: 'TOPIC_ENROLLED',
+            topicId: topicId.toString(),
+            topicTitle: title,
+          }
+        );
+      } catch (notifErr) {
+        console.error('Error sending enrollment notification:', notifErr);
+        // Don't fail the response if notification fails
+      }
+
       return res.json({ success: true, message: 'Successfully enrolled in the free course' });
     }
 
