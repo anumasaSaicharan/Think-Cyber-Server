@@ -235,6 +235,7 @@ app.use('/api', subcategoryRoutes);
 app.use('/api', termsConditionsRoutes);
 app.use('/api', privacyPoliciesRoutes);
 app.use('/api', homepageRoutes);
+app.use('/api', contactRoutes);
 app.use('/api', analyticsUsersRoutes);
 app.use('/api', topicsRoutes);
 app.use('/api', topicsActionsRoutes);

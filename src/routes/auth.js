@@ -1154,6 +1154,165 @@ router.get('/close-account/status', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/auth/delete-account:
+ *   delete:
+ *     tags: [Auth]
+ *     summary: Delete user account permanently
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - reason
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 example: 'user@example.com'
+ *               reason:
+ *                 type: string
+ *                 example: 'Too expensive'
+ *               otherReason:
+ *                 type: string
+ *                 example: ''
+ *     responses:
+ *       200:
+ *         description: Account deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 message:
+ *                   type: string
+ *       400:
+ *         description: Invalid input or email mismatch
+ *       401:
+ *         description: Unauthorized or token missing
+ *       500:
+ *         description: Server error
+ */
+router.delete('/delete-account', async (req, res) => {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, error: 'No token provided' });
+  }
+  const token = authHeader.split(' ')[1];
+
+  const { email, reason, otherReason } = req.body;
+
+  if (!email || !reason) {
+    return res.status(400).json({ success: false, error: 'Email and reason are required' });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    // Safety check: ensure the token belongs to the email requested for deletion
+    if (decoded.email !== email) {
+      client.release();
+      return res.status(400).json({ success: false, error: 'Email mismatch: Token does not match provided email' });
+    }
+
+    // Optional: Log the deletion reason for analytics
+    console.log(`[Account Deletion] User: ${email}, ID: ${decoded.userId}, Reason: ${reason}, Other: ${otherReason}`);
+
+    await client.query('BEGIN');
+
+    // First check if user exists and get data for audit
+    const userRes = await client.query('SELECT * FROM users WHERE id = $1', [decoded.userId]);
+    if (userRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    const userData = userRes.rows[0];
+
+    // Audit: Store deleted user details
+    try {
+      await client.query(
+        `INSERT INTO deleted_users_audit 
+            (original_user_id, email, name, reason, other_reason, full_user_data) 
+            VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          userData.id,
+          userData.email,
+          userData.name,
+          reason,
+          otherReason || null,
+          JSON.stringify(userData)
+        ]
+      );
+    } catch (auditErr) {
+      console.warn(`[Delete Account] Warning: Failed to audit deleted user: ${auditErr.message}`);
+      // We do NOT rollback here; auditing is secondary to the user's request to delete.
+      // However, if strict auditing is required, we should throw. 
+      // For now, logging warning is safer for UX.
+    }
+
+    // Manual Cascade Deletion for tables that might not have ON DELETE CASCADE
+    // List of tables to clean up user data from
+    const userTables = [
+      'user_category_bundles',
+      'topic_enrollments',
+      'topic_progress',
+      'topic_reviews',
+      'user_enrollments',
+      'user_fcm_tokens',
+      'user_topic_progress', // Note: duplicate of topic_progress? checking both just in case
+      'user_topics',
+      'achievements',
+      'notification_history'
+    ];
+
+    for (const table of userTables) {
+      try {
+        // Create a savepoint to isolate this operation
+        await client.query('SAVEPOINT cleanup_savepoint');
+
+        // We use a safe parameterized query, but table name cannot be parameterized.
+        // Since table names are hardcoded above, this is safe.
+        await client.query(`DELETE FROM ${table} WHERE user_id = $1`, [decoded.userId]);
+
+        // If successful, release the savepoint
+        await client.query('RELEASE SAVEPOINT cleanup_savepoint');
+      } catch (tableErr) {
+        // If operation failed, rollback to the savepoint so the main transaction stays valid
+        await client.query('ROLLBACK TO SAVEPOINT cleanup_savepoint');
+
+        // If table doesn't exist or column doesn't exist, we log and continue
+        // This makes the endpoint robust against schema mismatches
+        console.warn(`[Delete Account] Warning: Failed to delete from ${table}: ${tableErr.message}`);
+      }
+    }
+
+    // Delete user (this will cascade to otp_verifications if constraint exists)
+    await client.query('DELETE FROM users WHERE id = $1', [decoded.userId]);
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: 'Account deleted successfully' });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Delete account error:', err);
+    if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError') {
+      return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+    }
+    res.status(500).json({ success: false, error: 'Failed to delete account. Database error.' });
+  } finally {
+    client.release();
+  }
+});
+
 module.exports = router;
 
 // DEBUG: Inspect users table
